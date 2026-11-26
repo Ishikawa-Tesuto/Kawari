@@ -4,6 +4,10 @@ version = "0.3.0-alpha.1"
 edition = "2021"
 publish = false
 
+[[bin]]
+name = "kawari-viewer"
+path = "legacy/viewer.rs"
+
 [profile.release]
 lto = true
 strip = true

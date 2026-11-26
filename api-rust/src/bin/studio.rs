@@ -10,8 +10,10 @@ static STOP: AtomicBool = AtomicBool::new(false);
 extern "C" fn stop(_: libc::c_int) { STOP.store(true, Ordering::Relaxed); }
 fn stopped() -> bool { STOP.load(Ordering::Relaxed) }
 fn read_json(p: &Path) -> R<V> {
-    let b = fs::read(p)?;
-    let v: V = serde_json::from_slice(b.strip_prefix(&[0xef,0xbb,0xbf]).unwrap_or(&b))?;
+    parse_json(p, &fs::read(p)?)
+}
+fn parse_json(p: &Path, bytes: &[u8]) -> R<V> {
+    let v: V = serde_json::from_slice(bytes.strip_prefix(&[0xef,0xbb,0xbf]).unwrap_or(bytes))?;
     if !v.is_object() { return Err(err(format!("Expected JSON object: {}",p.display()))); }
     Ok(v)
 }
@@ -270,7 +272,7 @@ fn run_session(a:&mut Args,p:&mut Profile,lib:&mut library::Library,runtime:&Run
         let mut cmd=Command::new(&twitch_bin);cmd.arg(mailbox.path()).arg(&twitch_data).arg(a.port.to_string());
         match Managed::spawn(cmd,"twitch",tx.clone()){Ok(child)=>Some(child),Err(e)=>{eprintln!("[twitch] {e}");None}}
     }else{None};
-    lib.save_ready(&p.model)?;println!("[studio] Ready: renderer + VTS API");
+    lib.save_ready(&p.model);println!("[studio] Ready: renderer + VTS API");
     while !stopped(){
         if let Some(s)=viewer.child.try_wait()?{return Ok(SessionExit::End(s.code().unwrap_or(1)))}
         if let Some(s)=api.child.try_wait()?{return Err(err(format!("API exited unexpectedly ({s})")))}
@@ -315,7 +317,7 @@ fn run_session(a:&mut Args,p:&mut Profile,lib:&mut library::Library,runtime:&Run
                 if let Some(reason)=rejection{
                     eprintln!("[library] Hot switch rejected: {reason}");let mut notice=tempfile::NamedTempFile::new_in(mailbox.path())?;writeln!(notice,"{reason}")?;notice.persist(mailbox.path().join("error.txt"))?;
                 }else{
-                    lib.refresh(&p.model);lib.publish(mailbox.path())?;lib.save_ready(&p.model)?;
+                    lib.refresh(&p.model);lib.publish(mailbox.path())?;lib.save_ready(&p.model);
                     let mut done=tempfile::NamedTempFile::new_in(mailbox.path())?;writeln!(done,"{}",p.model.display())?;done.persist(mailbox.path().join("loaded.txt"))?;
                     println!("[studio] Ready: renderer + VTS API (hot switch; sessions retained)");
                 }
@@ -331,18 +333,8 @@ fn run()->R<i32>{
     if a.prepare_only{prepare(&a)?;return Ok(0)}
     let runtime=RuntimePaths::resolve(&env::current_exe()?)?;
     let mut lib=library::Library::load()?;for dir in &a.library_dirs{lib.add_root(dir)?;}
-    if a.model.as_os_str().is_empty() {
-        a.model = if let Some(last) = lib.last.as_ref().filter(|model| model.is_file()) {
-            last.clone()
-        } else {
-            let sample = runtime.sample_model();
-            if !sample.is_file() {
-                return Err(err("Haru is missing. Pass an original .model3.json file or check the Cubism sample resources."));
-            }
-            sample
-        };
-    }
-    a.model=library::original(&a.model)?;let mut p=prepare(&a)?;
+    a.model=lib.startup_model(&a.model, &runtime.sample_model())?;
+    let mut p=prepare(&a)?;
     loop{if stopped(){return Ok(0)}match run_session(&mut a,&mut p,&mut lib,&runtime)?{SessionExit::End(code)=>return Ok(code),SessionExit::Switch(next,next_profile)=>{a=next;p=next_profile;}}}
 }
 fn main(){match run(){Ok(code)=>std::process::exit(code),Err(e)=>{eprintln!("[studio] {e}");std::process::exit(1)}}}

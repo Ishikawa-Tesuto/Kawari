@@ -6,3 +6,6 @@ __pycache__/
 /api-rust/target
 /pkg/
 /*.pkg.tar.*
+
+# makepkg extracts sources here when run from the repository root.
+/src/

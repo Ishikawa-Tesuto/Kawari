@@ -34,7 +34,7 @@ int main(){
         for file in ['scripts/build.sh','scripts/source-id.sh','scripts/patch_sdk.py']:
             self.assertIn('studio_background.hpp',(ROOT/file).read_text())
     def test_launcher_sets_environment(self):
-        s=(ROOT/'src/main.rs').read_text()
+        s=(ROOT/'legacy/viewer.rs').read_text()
         self.assertIn('opts.no_preview=true; opts.broadcast=true; opts.offscreen=true;',s)
         self.assertIn('.env("STUDIO_NO_PREVIEW",if opts.no_preview {"1"} else {"0"})',s)
 if __name__=='__main__': unittest.main()

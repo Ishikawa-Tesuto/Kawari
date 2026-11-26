@@ -35,7 +35,7 @@ class StartupPaths(unittest.TestCase):
                 result = subprocess.run([str(release/'kawari'),'--allow-plugin','Test',str(model)],
                                         env=env,cwd=base,capture_output=True,text=True,timeout=10)
                 self.assertNotEqual(result.returncode,0,result.stdout+result.stderr)
-                self.assertIn(f'[studio] project: {root}',result.stdout)
+                self.assertIn(f'[studio] runtime: {root}',result.stdout)
                 return result.stderr
             build = root/'build'; build.mkdir()
             self.assertIn(str(build/'studio-build-id'),run())
