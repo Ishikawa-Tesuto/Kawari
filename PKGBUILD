@@ -1,7 +1,7 @@
 # Local package recipe. Run makepkg from the Kawari source directory.
 pkgname=kawari
 pkgver=0.5h3
-pkgrel=3
+pkgrel=4
 pkgdesc='Live2D avatar and livestreaming app with PipeWire video output'
 arch=('x86_64')
 # makepkg's debug path remapping uses RUSTFLAGS, which Cargo splits on spaces.
@@ -26,19 +26,25 @@ package() {
     local runtime="$pkgdir/usr/lib/kawari"
     local renderer="$runtime/native/bin/Demo"
     local build_dir="$startdir/build"
+    local native_dir="$build_dir/native/bin/Demo"
+    local sample_dir="$native_dir/Resources/Haru"
     local release_dir="$startdir/api-rust/target/release"
     local library soname object needed size
     local app_id=ru.tesutoidclub.Kawari
 
-    install -dm755 "$runtime/native/bin" "$pkgdir/usr/bin"
+    install -dm755 "$renderer/Resources" "$pkgdir/usr/bin"
     install -m755 -t "$runtime" "$release_dir/studio" "$release_dir/studio-vts-api" \
         "$release_dir/kawari-global-shortcuts" "$build_dir/kawari-twitch"
-    cp -RL -- "$build_dir/native/bin/." "$runtime/native/bin/"
+    install -m755 "$native_dir/Demo" "$renderer/Demo" || return 1
+    cp -RL -- "$native_dir/FrameworkShaders" "$native_dir/SampleShaders" "$renderer/" || return 1
+    # Cubism initializes these textures even when Kawari hides the sample controls.
+    install -m644 -t "$renderer/Resources" "$native_dir/Resources/"{back_class_normal,icon_gear,close}.png || return 1
 
-    if [[ ! -r "$renderer/Resources/Haru/Haru.model3.json" &&
-          -r "$build_dir/sdk/Samples/Resources/Haru/Haru.model3.json" ]]; then
-        install -dm755 "$renderer/Resources"
-        cp -RL -- "$build_dir/sdk/Samples/Resources/Haru" "$renderer/Resources/"
+    if [[ ! -r "$sample_dir/Haru.model3.json" ]]; then
+        sample_dir="$build_dir/sdk/Samples/Resources/Haru"
+    fi
+    if [[ -r "$sample_dir/Haru.model3.json" ]]; then
+        cp -RL -- "$sample_dir" "$renderer/Resources/" || return 1
     fi
     for library in libfunnel.so libfunnel-vk.so; do
         install -m755 "$build_dir/funnel/$library" "$renderer/$library"
