@@ -101,7 +101,6 @@ cmake -S "$STAGE/Samples/Vulkan/Demo/proj.linux.cmake" -B "$ROOT/build/native" -
   -DSTUDIO_IMGUI_ROOT="$IMGUI_ROOT" -DSTUDIO_FUNNEL_BUILD="$FUNNEL_BUILD" -DSTUDIO_FUNNEL_INCLUDE="$FUNNEL_INCLUDE" \
   -DCMAKE_BUILD_TYPE=Release -DCSM_MINIMUM_DEMO=OFF -DGLFW_BUILD_WAYLAND=ON -DGLFW_BUILD_X11=ON
 cmake --build "$ROOT/build/native" --parallel "${JOBS:-4}"
-(cd "$ROOT" && cargo build --locked --release)
 "$ROOT/scripts/build-core.sh"
 [[ -x "$ROOT/build/native/bin/Demo/Demo" ]] || { echo 'Expected native viewer not found' >&2; exit 1; }
 [[ "$(bash "$ROOT/scripts/source-id.sh")" == "$SOURCE_ID" ]] || { echo 'Sources changed during build. Rebuild.' >&2; exit 1; }

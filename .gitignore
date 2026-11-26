@@ -4,3 +4,5 @@
 !/vendor/.gitkeep
 __pycache__/
 /api-rust/target
+/pkg/
+/*.pkg.tar.*
