@@ -150,7 +150,7 @@ void broadcast_init(VkInstance instance, VkPhysicalDevice physical, VkDevice dev
     }
     check(funnel_new(&ctx),"create context");
     check(funnel_set_app_name(ctx,"Kawari"),"app name");
-    check(funnel_set_app_id(ctx,"ru.tesutoidclub.vtuber-studio"),"app id");
+    check(funnel_set_app_id(ctx,"ru.tesutoidclub.Kawari"),"app id");
     check(funnel_set_app_version(ctx,"0.2b1"),"app version");
     check(funnel_connect(ctx),"connect PipeWire");
     check(funnel_stream_create(ctx,"Live2D",&stream),"create stream");

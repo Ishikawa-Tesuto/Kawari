@@ -12,8 +12,8 @@ def name(i): return props(nodes.get(i,{})).get("node.name",str(i))
 matches=[]
 for i,o in nodes.items():
  p=props(o); n=name(i); cl=str(p.get("media.class","")); desc=str(p.get("node.description",""))
- if "Stream/Output/Video" in cl and ("ru.tesutoidclub.vtuber-studio" in n or (("Kawari" in desc or "VTuber Studio" in desc) and "Live2D" in desc)):
-  matches.append(i); print("[STUDIO] id={} state={} name={} description={}".format(i,info(o).get("state","?"),n,desc))
+ if "Stream/Output/Video" in cl and ("ru.tesutoidclub.kawari" in n.lower() or ("Kawari" in desc and "Live2D" in desc)):
+  matches.append(i); print("[KAWARI] id={} state={} name={} description={}".format(i,info(o).get("state","?"),n,desc))
 for o in objects:
  if o.get("type")!="PipeWire:Interface:Link": continue
  li=info(o); src=li.get("output-node-id"); dst=li.get("input-node-id")

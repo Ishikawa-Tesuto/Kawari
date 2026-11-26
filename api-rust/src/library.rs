@@ -18,17 +18,7 @@ pub(super) fn directory() -> R<PathBuf> {
     let base = env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|v| PathBuf::from(v).join(".local/share")))
         .ok_or_else(|| err("Missing HOME"))?;
-    let current=base.join("kawari");let legacy=base.join("vtuber-studio");
-    // Keep existing profiles in place (including locks, symlinks and absolute paths).
-    // An alias lets old tools continue to access the same data without duplication.
-    if fs::symlink_metadata(&legacy).is_ok(){
-        if !legacy.is_dir(){return Err(err("Legacy data path is not a directory"))}
-        if fs::symlink_metadata(&current).is_err(){
-            match std::os::unix::fs::symlink(legacy.canonicalize()?,&current){Ok(())=>{},Err(e) if e.kind()==io::ErrorKind::AlreadyExists=>{},Err(e)=>return Err(e.into())}
-        }
-        if current.canonicalize()?!=legacy.canonicalize()?{return Err(err("Both Kawari and legacy data directories exist; resolve manually without overwriting profiles"))}
-    }
-    Ok(current)
+    Ok(base.join("kawari"))
 }
 #[derive(Default)]
 pub(super) struct Library { pub last: Option<PathBuf>, models: BTreeSet<PathBuf>, roots: BTreeSet<PathBuf> }

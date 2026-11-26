@@ -3,11 +3,11 @@
 </p>
 <h1 align="center">Kawari</h1>
 
-Kawari is a native VTuber studio for Linux. Load a Live2D model, configure tracking and expressions, add props to your scene, and send video with a transparent background to OBS over PipeWire.
+Kawari is a native Linux app for Live2D avatars and livestreaming. Load a Live2D model, configure tracking and expressions, add props to your scene, and send video with a transparent background to OBS over PipeWire.
 
 **P0.5h3 · Prototype · Linux x86-64**
 
-[Build](#build-on-arch-linux) · [Launch](#first-launch) · [OBS](#stream-to-obs) · [Integrations](#integrations)
+[Install](#install-on-arch-linux) · [Build](#build-on-arch-linux) · [Launch](#first-launch) · [OBS](#stream-to-obs) · [Integrations](#integrations)
 
 ## Features
 
@@ -19,6 +19,19 @@ Kawari is a native VTuber studio for Linux. Load a Live2D model, configure track
 | **Workspace** | Dock panels on the right or open them as floating windows. Docked panels overlay the preview while the model keeps its position and scale. |
 | **Video output** | Send video with an alpha channel over PipeWire using DMA-BUF. Set the stream resolution independently of the window size. |
 | **Integrations** | Connect VBridger and other clients through Kawari's partial implementation of the VTube Studio Public API. Bind Twitch Channel Points rewards to expressions. |
+
+## Install on Arch Linux
+
+Set up the [Cubism SDK](#2-set-up-the-cubism-sdk), then run the following from the project root as your normal user. `makepkg` builds the local package, installs its dependencies and prompts for permission to install it through pacman.
+
+```bash
+sudo pacman -S --needed base-devel
+makepkg -si
+```
+
+Launch **Kawari** from your application menu or run `kawari`. If you previously installed the per-user launcher from a source checkout, move it aside with `./scripts/install-portal-identity.sh --installed` so your desktop uses the packaged launcher.
+
+Use `makepkg -fsi` to rebuild and reinstall the same package version after a source update. To uninstall, run `sudo pacman -R kawari`. Your models and profiles remain in your user directories.
 
 ## Build on Arch Linux
 
@@ -51,15 +64,15 @@ The build patches a copy of the Cubism SDK in `build/sdk` and fetches pinned dep
 
 ## First launch
 
-Run Kawari from the project root. On the first launch, it opens Haru from the Cubism SDK. On later launches, it opens the last available model.
+On the first launch, Kawari opens Haru when the Cubism sample is available. On later launches, it opens the last available model. For a source build, run this command from the project root.
 
 ```bash
 ./scripts/run-kawari.sh
 ```
 
-Open **Model Library** to switch to your own model. You can also pass its original `.model3.json` path to `./scripts/run-kawari.sh` or use `--library-dir` to add a folder of models. Run `./scripts/run-kawari.sh --help` for all launch options.
+Open **Model Library** to switch to your own model. You can also pass its original `.model3.json` path to `kawari` or `./scripts/run-kawari.sh`, or use `--library-dir` to add a folder of models. Pass `--help` for all launch options.
 
-To launch Kawari from your desktop's application menu, install the launcher and its icon. Run the command again if you move the project folder.
+To launch a source build from your application menu, install its launcher and icon. Run the command again if you move the project folder.
 
 ```bash
 ./scripts/install-portal-identity.sh
@@ -73,13 +86,13 @@ To launch Kawari from your desktop's application menu, install the launcher and 
 
 Set the stream resolution and target frame rate under **Settings → Broadcast**. Changes to either setting take effect the next time you start Kawari. Run `./scripts/broadcast-status.sh` to check whether Kawari is publishing the stream.
 
-Use `--no-preview` to stream with the preview window hidden. If you saved that mode as your default, run `./scripts/run-kawari.sh --preview` to show the window for one launch.
+Use `--no-preview` to stream with the preview window hidden. If you saved that mode as your default, pass `--preview` to show the window for one launch.
 
 ## Integrations
 
 - **VBridger and plugins.** Connect to `ws://127.0.0.1:8001`, or use the port you passed to Kawari with `--port`. Approve the client's request under **Integrations → Plugins**.
-- **Twitch.** Install `curl`, `json-c`, and `xdg-utils`, then run `./scripts/build-twitch.sh`. Open **Integrations → Twitch**, enter your Twitch application's public Client ID, and click **Connect** to authorize your account. You can then bind a Channel Points reward to an expression. In **Timed** mode, the countdown shows how long remains before the expression starts fading out. [Twitch Developer Console](https://dev.twitch.tv/console/apps)
-- **Global hotkeys.** Build the shortcut helper with `./scripts/build-global-shortcuts.sh`. On X11, enable **Global** for an assigned hotkey. On Wayland, global registration is experimental and disabled by default.
+- **Twitch.** The local package includes the Twitch helper. For a source build, install `curl`, `json-c`, and `xdg-utils`, then run `./scripts/build-twitch.sh`. Open **Integrations → Twitch**, enter your Twitch application's public Client ID, and click **Connect** to authorize your account. You can then bind a Channel Points reward to an expression. In **Timed** mode, the countdown shows how long remains before the expression starts fading out. [Twitch Developer Console](https://dev.twitch.tv/console/apps)
+- **Global hotkeys.** The local package includes the shortcut helper. For a source build, build it with `./scripts/build-global-shortcuts.sh`. On X11, enable **Global** for an assigned hotkey. On Wayland, global registration is experimental and disabled by default.
 
 ## Data and settings
 

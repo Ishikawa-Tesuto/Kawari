@@ -44,13 +44,15 @@ class NativeCore(unittest.TestCase):
         p=self.prepare();self.assertEqual(p.returncode,0,p.stderr)
         self.assertEqual(self.before,{p:p.read_bytes() for p in self.src.iterdir()})
         self.assertNotEqual(self.prepare('--profile-dir',str(self.src/'bad')).returncode,0)
-    def test_legacy_data_alias(self):
-        legacy=self.base/'data/vtuber-studio';legacy.mkdir(parents=True)
-        (legacy/'sentinel').write_text('existing data')
+    def test_existing_data_alias(self):
+        existing=self.base/'previous-data';existing.mkdir()
+        (existing/'sentinel').write_text('existing data')
+        alias=self.base/'data/kawari';alias.parent.mkdir()
+        alias.symlink_to(existing,target_is_directory=True)
         p=self.prepare();self.assertEqual(p.returncode,0,p.stderr)
-        self.assertTrue((self.base/'data/kawari').is_symlink())
-        self.assertEqual((legacy/'sentinel').read_text(),'existing data')
-        self.assertTrue((legacy/'profiles'/self.profile.name/'parameters.map').is_file())
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual((existing/'sentinel').read_text(),'existing data')
+        self.assertTrue((existing/'profiles'/self.profile.name/'parameters.map').is_file())
     def test_plain_model_editable_map(self):
         (self.src/'Test.vtube.json').unlink()
         p=self.prepare();self.assertEqual(p.returncode,0,p.stderr)

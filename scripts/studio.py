@@ -23,7 +23,7 @@ def prepare(args):
         raise ValueError('Expected an original .model3.json file')
     key = hashlib.sha256(str(model).encode()).hexdigest()[:24]
     home = Path(os.environ.get('XDG_DATA_HOME') or Path.home()/'.local/share')
-    profile = (args.profile_dir or home/'vtuber-studio'/'profiles'/key).resolve()
+    profile = (args.profile_dir or home/'kawari'/'profiles'/key).resolve()
     if profile.is_relative_to(model.parent):
         raise ValueError('Studio profile must be outside original model directory')
     profile.mkdir(mode=0o700, parents=True, exist_ok=True)

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Kawari
+Comment=Live2D avatars and livestreaming
+Exec=/usr/bin/kawari
+Icon=ru.tesutoidclub.Kawari
+StartupWMClass=ru.tesutoidclub.Kawari
+Terminal=false
+Categories=AudioVideo;

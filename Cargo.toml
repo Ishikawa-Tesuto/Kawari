@@ -1,5 +1,5 @@
 [package]
-name = "vtuber-studio"
+name = "kawari-viewer"
 version = "0.3.0-alpha.1"
 edition = "2021"
 publish = false

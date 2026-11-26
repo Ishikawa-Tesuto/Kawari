@@ -14,7 +14,7 @@ async def run(args):
             r=json.loads(await asyncio.wait_for(ws.recv(),3))
             if r['messageType']=='APIError': raise ValueError(r['data']['message'])
             return r['data']
-        identity=dict(pluginName='Studio Hotkeys',pluginDeveloper='VTuber Studio')
+        identity=dict(pluginName='Studio Hotkeys',pluginDeveloper='Kawari')
         token=(await request('AuthenticationTokenRequest',identity))['authenticationToken']
         if not (await request('AuthenticationRequest',dict(identity,authenticationToken=token)))['authenticated']: raise ValueError('Authentication failed')
         if args.action=='list': data=await request('HotkeysInCurrentModelRequest',{})

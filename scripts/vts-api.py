@@ -261,7 +261,7 @@ class Bridge:
     async def discovery(self,port):
         with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as udp:
             while self.sock.exists():
-                data=dict(active=True,port=port,instanceID=self.instance,windowTitle='VTuber Studio (Linux)')
+                data=dict(active=True,port=port,instanceID=self.instance,windowTitle='Kawari')
                 try: udp.sendto(json.dumps(envelope('VTubeStudioAPIStateBroadcast',data,'VTubeStudioAPIStateBroadcast')).encode(),('127.0.0.1',47779))
                 except OSError: pass
                 await asyncio.sleep(2)

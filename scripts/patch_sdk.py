@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 import re
 
-MARKER = "// VTUBER_STUDIO_P02C1"
+MARKER = "// KAWARI_P02C1"
 
 def replace_once(text, old, new, label):
     if text.count(old) != 1:
@@ -181,7 +181,7 @@ def patch(sdk, native):
     def rep(text, old, new, label):
         return replace_once(text, old, new, label)
     manager = read("LAppLive2DManager.cpp")
-    if "// VTUBER_STUDIO_P0" in manager:
+    if '#include "studio_controls.hpp"' in manager:
         raise ValueError("SDK already patched. Remove staged SDK and rebuild.")
     manager = rep(manager, '#include "LAppLive2DManager.hpp"', '#include "LAppLive2DManager.hpp"\n#include <string>\n#include <cstdlib>\n#include <Rendering/Vulkan/CubismRenderer_Vulkan.hpp>\n#include "studio_controls.hpp"\n' + MARKER, 'manager includes')
     manager = rep(manager, 'void LAppLive2DManager::SetUpModel()\n{', '''void LAppLive2DManager::SetUpModel()
@@ -271,7 +271,7 @@ void LAppModel::SetupModel(ICubismModelSetting* setting)""", 'parameter updater 
     delegate = rep(delegate, '    _window = glfwCreateWindow(RenderTargetWidth, RenderTargetHeight,', '    _window = studio::app_icon::create_window(studio::window_width(RenderTargetWidth), studio::window_height(RenderTargetHeight),', 'window dimensions and icon')
     files[src / 'LAppDelegate.cpp'] = delegate
     cmake = (src / 'CMakeLists.txt').read_text()
-    cmake += '\n# VTUBER_STUDIO_P01C\ntarget_sources(${APP_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/studio_controls.cpp)\n'
+    cmake += '\n# KAWARI_P01C\ntarget_sources(${APP_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/studio_controls.cpp)\n'
     files[src / 'CMakeLists.txt'] = cmake
     parent = (proj / 'CMakeLists.txt').read_text()
     parent += '\nfind_package(Threads REQUIRED)\ntarget_link_libraries(${APP_NAME} Threads::Threads)\n'
@@ -525,7 +525,7 @@ endif()
     files[src / 'VulkanManager.hpp'] = h
     cmake = files[src / 'CMakeLists.txt']
     cmake += """
-# VTUBER_STUDIO_P05A: pinned upstream Dear ImGui, built with existing GLFW/Vulkan.
+# KAWARI_P05A: pinned upstream Dear ImGui, built with existing GLFW/Vulkan.
 if(NOT EXISTS "${STUDIO_IMGUI_ROOT}/imgui.cpp")
     message(FATAL_ERROR "STUDIO_IMGUI_ROOT missing; run scripts/build.sh")
 endif()

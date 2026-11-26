@@ -149,11 +149,37 @@ fn project_root(exe:&Path)->R<PathBuf>{
     if !root.join("scripts/source-id.sh").is_file(){return Err(err(format!("Kawari project not found at {}: missing scripts/source-id.sh",root.display())))}
     Ok(root.to_owned())
 }
+struct RuntimePaths {
+    root: PathBuf,
+    bin_dir: PathBuf,
+    installed: bool,
+}
+impl RuntimePaths {
+    fn resolve(exe: &Path) -> R<Self> {
+        let bin_dir = exe.parent().ok_or_else(|| err("Cannot locate Kawari's executable directory"))?;
+        let installed = bin_dir.join("native/bin").is_dir();
+        let root = if installed { bin_dir.to_owned() } else { project_root(exe)? };
+        Ok(Self { root, bin_dir: bin_dir.to_owned(), installed })
+    }
+
+    fn sample_model(&self) -> PathBuf {
+        self.root.join(if self.installed {
+            "native/bin/Demo/Resources/Haru/Haru.model3.json"
+        } else {
+            "build/sdk/Samples/Resources/Haru/Haru.model3.json"
+        })
+    }
+}
 fn build_stamp(path:&Path)->R<String>{
     fs::read_to_string(path).map_err(|e|err(format!("Cannot read renderer build marker {}: {e}. Run ./scripts/build.sh --with-broadcast",path.display())))
 }
-fn viewer_command(a:&Args,p:&Profile,root:&Path)->R<Command>{
-    let backend=if let Some(b)=env::var_os("STUDIO_VIEWER_BIN"){PathBuf::from(b)}else{
+fn viewer_command(a:&Args,p:&Profile,runtime:&RuntimePaths)->R<Command>{
+    let root=&runtime.root;
+    let backend=if let Some(b)=env::var_os("STUDIO_VIEWER_BIN") {
+        PathBuf::from(b)
+    } else if runtime.installed {
+        root.join("native/bin/Demo/Demo")
+    } else {
         let expected=build_stamp(&root.join("build/studio-build-id"))?;
         let script=root.join("scripts/source-id.sh");
         let actual=Command::new("bash").arg(&script).output().map_err(|e|err(format!("Cannot run {}: {e}",script.display())))?;
@@ -162,11 +188,14 @@ fn viewer_command(a:&Args,p:&Profile,root:&Path)->R<Command>{
         if !a.no_broadcast&&build_stamp(&root.join("build/studio-broadcast-enabled"))?.trim()!="1"{return Err(err("Build with --with-broadcast first"))}
         root.join("build/native/bin/Demo/Demo")
     };
-    let backend=backend.canonicalize().map_err(|e|err(format!("Renderer not found at {}: {e}. Check STUDIO_VIEWER_BIN or run ./scripts/build.sh --with-broadcast",backend.display())))?;
+    let backend=backend.canonicalize().map_err(|e|err(format!("Renderer not found at {}: {e}",backend.display())))?;
     let meta=fs::metadata(&backend).map_err(|e|err(format!("Cannot inspect renderer {}: {e}",backend.display())))?;
     if !meta.is_file()||meta.mode()&0o111==0{return Err(err(format!("Renderer is not an executable file: {}",backend.display())))}
     println!("[studio] renderer: {}",backend.display());
     let mut cmd=Command::new(&backend);cmd.current_dir(backend.parent().unwrap());
+    if runtime.installed && env::var_os("STUDIO_UI").is_none() {
+        cmd.env("STUDIO_UI", "1");
+    }
     for(k,v)in [("STUDIO_FPS",a.fps.to_string()),("STUDIO_MASK_SIZE",a.mask.to_string()),("STUDIO_SSAA",a.ssaa.to_string()),("STUDIO_OFFSCREEN",((!a.no_broadcast) as u8).to_string()),("STUDIO_STATS",(a.stats as u8).to_string()),("STUDIO_DEMO","0".into()),("STUDIO_BROADCAST",((!a.no_broadcast) as u8).to_string()),("STUDIO_NO_PREVIEW",(a.no_preview as u8).to_string()),("STUDIO_BROADCAST_FPS",a.bfps.to_string()),("STUDIO_PARAMETER_INPUT","1".into()),("STUDIO_WIDTH",a.size.0.to_string()),("STUDIO_HEIGHT",a.size.1.to_string()),("STUDIO_BROADCAST_WIDTH",a.output.0.to_string()),("STUDIO_BROADCAST_HEIGHT",a.output.1.to_string())]{cmd.env(k,v);}cmd.env("STUDIO_MODEL",&p.runtime).env_remove("STUDIO_PARAMETER_MAP").env_remove("STUDIO_EDITABLE_MAP");if let Some(m)=&p.mapping{cmd.env("STUDIO_PARAMETER_MAP",m);if a.mapping.is_none(){cmd.env("STUDIO_EDITABLE_MAP",m);}}Ok(cmd)
 }
 enum SessionExit { End(i32), Switch(Args, Profile) }
@@ -217,18 +246,16 @@ fn private_mailbox()->R<tempfile::TempDir>{
     }
     Ok(dir)
 }
-fn run_session(a:&mut Args,p:&mut Profile,lib:&mut library::Library)->R<SessionExit>{
-    let exe=env::current_exe().map_err(|e|err(format!("Cannot resolve Kawari executable: {e}")))?;
-    let root=project_root(&exe)?;
-    println!("[studio] project: {}",root.display());
-    let api_bin=exe.with_file_name("studio-vts-api");
-    if !api_bin.is_file(){return Err(err(format!("Rust API missing: {}; run ./scripts/build-core.sh",api_bin.display())))}
-    let hot=env::var("STUDIO_HOT_SWITCH").as_deref()==Ok("1")&&!a.no_broadcast&&!a.no_preview;
+fn run_session(a:&mut Args,p:&mut Profile,lib:&mut library::Library,runtime:&RuntimePaths)->R<SessionExit>{
+    println!("[studio] runtime: {}",runtime.root.display());
+    let api_bin=runtime.bin_dir.join("studio-vts-api");
+    if !api_bin.is_file(){return Err(err(format!("Rust API missing: {}",api_bin.display())))}
+    let hot=env::var("STUDIO_HOT_SWITCH").map_or(runtime.installed, |v| v == "1")&&!a.no_broadcast&&!a.no_preview;
     // Private session mailbox; only supervisor commits model paths and catalog.
     let mailbox=private_mailbox().map_err(|e|err(format!("Cannot create session IPC in {}: {e}",env::temp_dir().display())))?;
     atomic_text(&mailbox.path().join("broadcast-current.tsv"),&a.broadcast_settings().encode())?;
     lib.refresh(&p.model);lib.publish(mailbox.path()).map_err(|e|err(format!("Cannot publish model library in {}: {e}",mailbox.path().display())))?;
-    let (tx,rx)=mpsc::channel();let mut viewer_cmd=viewer_command(a,p,&root)?;
+    let (tx,rx)=mpsc::channel();let mut viewer_cmd=viewer_command(a,p,runtime)?;
     viewer_cmd.env("STUDIO_LIBRARY_DIR",mailbox.path()).env("STUDIO_ORIGINAL_MODEL",&p.model).env("STUDIO_HOT_SWITCH",if hot{"1"}else{"0"}).env("STUDIO_HOT_SWITCH_PROTOCOL",if hot{"1"}else{"0"});
     println!("[studio] Model switching: {}",if hot{"hot (protocol 1)"}else{"restart"});
     let mut viewer=Managed::spawn(viewer_cmd,"viewer",tx.clone())?;
@@ -237,7 +264,7 @@ fn run_session(a:&mut Args,p:&mut Profile,lib:&mut library::Library)->R<SessionE
     let mut api=start_api(a,p,&sock,&api_bin,hot.then_some(mailbox.path()),&tx)?;
     if wait_event(&rx,"ready",&mut viewer,Some(&mut api),a.timeout)?.is_none(){return Ok(SessionExit::End(0))}
     // Optional network helper. Its failure never interrupts the renderer or API.
-    let twitch_bin=root.join("build/kawari-twitch");
+    let twitch_bin=runtime.root.join(if runtime.installed { "kawari-twitch" } else { "build/kawari-twitch" });
     let twitch_data=library::directory()?;
     let mut twitch=if env::var("KAWARI_TWITCH_NATIVE").as_deref()!=Ok("0")&&twitch_bin.is_file(){
         let mut cmd=Command::new(&twitch_bin);cmd.arg(mailbox.path()).arg(&twitch_data).arg(a.port.to_string());
@@ -302,21 +329,21 @@ fn run()->R<i32>{
     let Some(mut a)=parse()? else{return Ok(0)};
     unsafe{libc::signal(libc::SIGINT,stop as libc::sighandler_t);libc::signal(libc::SIGTERM,stop as libc::sighandler_t);}
     if a.prepare_only{prepare(&a)?;return Ok(0)}
+    let runtime=RuntimePaths::resolve(&env::current_exe()?)?;
     let mut lib=library::Library::load()?;for dir in &a.library_dirs{lib.add_root(dir)?;}
     if a.model.as_os_str().is_empty() {
         a.model = if let Some(last) = lib.last.as_ref().filter(|model| model.is_file()) {
             last.clone()
         } else {
-            let root = project_root(&env::current_exe()?)?;
-            let sample = root.join("build/sdk/Samples/Resources/Haru/Haru.model3.json");
+            let sample = runtime.sample_model();
             if !sample.is_file() {
-                return Err(err("Haru is missing from the staged Cubism SDK. Run ./scripts/build.sh or pass an original .model3.json file."));
+                return Err(err("Haru is missing. Pass an original .model3.json file or check the Cubism sample resources."));
             }
             sample
         };
     }
     a.model=library::original(&a.model)?;let mut p=prepare(&a)?;
-    loop{if stopped(){return Ok(0)}match run_session(&mut a,&mut p,&mut lib)?{SessionExit::End(code)=>return Ok(code),SessionExit::Switch(next,next_profile)=>{a=next;p=next_profile;}}}
+    loop{if stopped(){return Ok(0)}match run_session(&mut a,&mut p,&mut lib,&runtime)?{SessionExit::End(code)=>return Ok(code),SessionExit::Switch(next,next_profile)=>{a=next;p=next_profile;}}}
 }
 fn main(){match run(){Ok(code)=>std::process::exit(code),Err(e)=>{eprintln!("[studio] {e}");std::process::exit(1)}}}
 #[cfg(test)]mod tests{use super::*;
