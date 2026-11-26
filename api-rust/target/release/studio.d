@@ -1,1 +1,0 @@
-/home/kami/Documents/Tesuto\ Project/Kawari/api-rust/target/release/studio: /home/kami/Documents/Tesuto\ Project/Kawari/api-rust/src/bin/studio.rs /home/kami/Documents/Tesuto\ Project/Kawari/api-rust/src/library.rs
