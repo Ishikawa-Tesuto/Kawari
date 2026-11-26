@@ -24,6 +24,14 @@ class NativeTwitch(unittest.TestCase):
         from websockets.exceptions import ConnectionClosed
         def server(ws):
             try:
+                if ws.request.path in ('/event-initial','/event-replacement'):
+                    first=ws.request.path=='/event-initial'
+                    ws.send(json.dumps({'metadata':{'message_type':'session_welcome'},'payload':{'session':{'id':'initial' if first else 'replacement','keepalive_timeout_seconds':10}}}))
+                    if first:
+                        ws.send(json.dumps({'metadata':{'message_type':'session_reconnect'},'payload':{'session':{'reconnect_url':'wss://eventsub.wss.twitch.tv/ws?reconnect=mock'}}}))
+                    for _ in ws:
+                        pass
+                    return
                 serve_messages(ws)
             except ConnectionClosed:
                 pass
@@ -32,6 +40,8 @@ class NativeTwitch(unittest.TestCase):
                 r=json.loads(text);kind=r['messageType'];data=r['data'];requests.append(kind)
                 if kind=='AuthenticationRequest':
                     assert data['authenticationToken']=='test-credential';response={'authenticated':True}
+                elif kind=='AuthenticationTokenRequest':
+                    time.sleep(.15);response={'authenticationToken':'test-credential'}
                 elif kind=='CurrentModelRequest':response={'modelLoaded':True,'modelID':'A','modelName':'TesutoXXI'}
                 elif kind=='ExpressionStateRequest':response={'modelID':'A','expressions':[{'file':'SharkTail - Toggle.exp3.json','name':'Tail'},{'file':'Halo.exp3.json','name':'Halo'}]}
                 elif kind=='KawariRewardExpressionRequest':calls.append(data);response={}
@@ -43,8 +53,9 @@ class NativeTwitch(unittest.TestCase):
             t=threading.Thread(target=s.serve_forever,daemon=True);t.start()
             p=subprocess.run([str(self.binary),d,str(s.socket.getsockname()[1])],text=True,capture_output=True,timeout=15)
             self.assertEqual(p.returncode,0,p.stdout+p.stderr)
-            self.assertEqual(calls,[{'expressionFile':'SharkTail - Toggle.exp3.json','mode':'toggle','duration':0,'modelID':'A'},{'expressionFile':'Halo.exp3.json','mode':'timed','duration':60,'modelID':'A'},{'expressionFile':'Halo.exp3.json','mode':'timed','duration':12,'modelID':'A'}])
-            self.assertEqual(requests.count('AuthenticationRequest'),1)
+            self.assertEqual(calls,[{'expressionFile':'SharkTail - Toggle.exp3.json','mode':'toggle','duration':0,'modelID':'A'},{'expressionFile':'Halo.exp3.json','mode':'timed','duration':60,'modelID':'A'},{'expressionFile':'Halo.exp3.json','mode':'timed','duration':12,'modelID':'A'},{'expressionFile':'Halo.exp3.json','mode':'timed','duration':60,'modelID':'A'}])
+            self.assertEqual(requests.count('AuthenticationRequest'),3)
+            self.assertEqual(requests.count('AuthenticationTokenRequest'),1)
             self.assertEqual((Path(d)/'bindings.json').stat().st_mode&0o777,0o600)
     def test_optional_helper_and_lock(self):
         with tempfile.TemporaryDirectory() as d:

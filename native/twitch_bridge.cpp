@@ -9,6 +9,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <set>
@@ -70,8 +71,61 @@ Curl handle(){Curl c(curl_easy_init());if(!c)throw std::runtime_error("Cannot in
 S escape(const S& s){auto c=handle();char* p=curl_easy_escape(c.get(),s.data(),s.size());if(!p)throw std::runtime_error("Cannot encode request");S out=p;curl_free(p);return out;}
 S form(std::initializer_list<std::pair<S,S>> args){S r;for(auto& [k,v]:args){if(!r.empty())r+='&';r+=escape(k)+"="+escape(v);}return r;}
 size_t append(char* p,size_t a,size_t b,void* user){auto& s=*static_cast<S*>(user);if(a&&b>Limit/a)return 0;auto n=a*b;if(n>Limit-s.size())return 0;s.append(p,n);return n;}
-struct HttpError:std::runtime_error{long status;S reason;HttpError(long s,S r):std::runtime_error("Twitch HTTP "+std::to_string(s)),status(s),reason(std::move(r)){} };
-J http(const S& url,const S& body={},const std::vector<S>& headers={}){auto c=handle();S out;curl_slist* list=nullptr;for(const auto& h:headers)list=curl_slist_append(list,h.c_str());std::unique_ptr<curl_slist,decltype(&curl_slist_free_all)> guard(list,curl_slist_free_all);curl_easy_setopt(c.get(),CURLOPT_URL,url.c_str());curl_easy_setopt(c.get(),CURLOPT_PROTOCOLS_STR,"https");curl_easy_setopt(c.get(),CURLOPT_HTTPHEADER,list);curl_easy_setopt(c.get(),CURLOPT_WRITEFUNCTION,append);curl_easy_setopt(c.get(),CURLOPT_WRITEDATA,&out);if(!body.empty()){curl_easy_setopt(c.get(),CURLOPT_POSTFIELDS,body.data());curl_easy_setopt(c.get(),CURLOPT_POSTFIELDSIZE,long(body.size()));}auto r=curl_easy_perform(c.get());if(r!=CURLE_OK)throw std::runtime_error(S("Twitch transport: ")+curl_easy_strerror(r));long status=0;curl_easy_getinfo(c.get(),CURLINFO_RESPONSE_CODE,&status);if(status<200||status>=300){S reason;try{reason=J::parse(out).text("message");}catch(...){}throw HttpError(status,reason);}return out.empty()?J::obj():J::parse(out);}
+struct TransportError:std::runtime_error{using std::runtime_error::runtime_error;};
+struct LoginRequired:std::runtime_error{using std::runtime_error::runtime_error;};
+struct HttpError:std::runtime_error {
+    long status;
+    S reason;
+    std::chrono::seconds retry_after;
+    HttpError(long s,S r,std::chrono::seconds delay=0s)
+        :std::runtime_error("Twitch HTTP "+std::to_string(s)),status(s),reason(std::move(r)),retry_after(delay){}
+    bool temporary() const {return status==408||status==429||status>=500;}
+};
+std::chrono::seconds retry_delay(CURL* curl) {
+    for (const char* name : {"Retry-After", "Ratelimit-Reset"}) {
+        curl_header* header = nullptr;
+        if (curl_easy_header(curl, name, 0, CURLH_HEADER, -1, &header) != CURLHE_OK) continue;
+        try {
+            size_t length = 0;
+            S text = header->value;
+            auto seconds = std::stoll(text, &length);
+            if (length != text.size() || seconds < 0) continue;
+            if (S(name) == "Ratelimit-Reset") {
+                auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                seconds -= now;
+            }
+            return std::chrono::seconds(std::clamp(seconds, 1LL, 86400LL));
+        } catch (const std::logic_error&) {}
+    }
+    return 60s;
+}
+J http(const S& url, const S& body, const std::vector<S>& headers) {
+    auto c = handle();
+    S out;
+    curl_slist* list = nullptr;
+    for (const auto& value : headers) list = curl_slist_append(list, value.c_str());
+    std::unique_ptr<curl_slist, decltype(&curl_slist_free_all)> guard(list, curl_slist_free_all);
+    curl_easy_setopt(c.get(), CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c.get(), CURLOPT_PROTOCOLS_STR, "https");
+    curl_easy_setopt(c.get(), CURLOPT_HTTPHEADER, list);
+    curl_easy_setopt(c.get(), CURLOPT_WRITEFUNCTION, append);
+    curl_easy_setopt(c.get(), CURLOPT_WRITEDATA, &out);
+    if (!body.empty()) {
+        curl_easy_setopt(c.get(), CURLOPT_POSTFIELDS, body.data());
+        curl_easy_setopt(c.get(), CURLOPT_POSTFIELDSIZE, long(body.size()));
+    }
+    auto result = curl_easy_perform(c.get());
+    if (result != CURLE_OK) throw TransportError(S("Twitch transport: ") + curl_easy_strerror(result));
+    long status = 0;
+    curl_easy_getinfo(c.get(), CURLINFO_RESPONSE_CODE, &status);
+    if (status < 200 || status >= 300) {
+        S reason;
+        try { reason = J::parse(out).text("message"); } catch (const std::exception&) {}
+        throw HttpError(status, reason, status == 429 ? retry_delay(c.get()) : 0s);
+    }
+    return out.empty() ? J::obj() : J::parse(out);
+}
 struct WS {
     Curl c;
     S pending;
@@ -86,57 +140,669 @@ struct WS {
     void send(const J& j){S s=j.dump();size_t sent=0;auto end=Clock::now()+5s;for(;;){size_t n=0;auto r=curl_ws_send(c.get(),s.data()+sent,s.size()-sent,&n,0,CURLWS_TEXT);sent+=n;if(r==CURLE_OK&&sent==s.size())return;if(r!=CURLE_AGAIN&&r!=CURLE_OK)throw std::runtime_error("WebSocket send failed");if(Clock::now()>=end)throw std::runtime_error("WebSocket send timed out");std::this_thread::sleep_for(15ms);}}
 };
 J identity(){auto j=J::obj();j.set("pluginName","Kawari Twitch");j.set("pluginDeveloper","Kawari");return j;}
+struct ApprovalRequired:std::runtime_error{using std::runtime_error::runtime_error;};
+struct ApiError:std::runtime_error {
+    int code;
+    explicit ApiError(int error) : std::runtime_error("Kawari rejected a local API request"), code(error) {}
+};
 struct Api {
-    WS ws;unsigned seq=0;
+    WS ws;
+    unsigned seq = 0;
+    S approval_request;
+    Clock::time_point approval_deadline{};
     explicit Api(unsigned port):ws("ws://127.0.0.1:"+std::to_string(port),true){}
-    J call(const S& type,const J& data=J::obj(),std::chrono::milliseconds timeout=5s){auto j=J::obj();S id=std::to_string(++seq);j.set("apiName","VTubeStudioPublicAPI");j.set("apiVersion","1.0");j.set("requestID",id);j.set("messageType",type+"Request");j.set("data",data);ws.send(j);auto r=ws.recv(timeout);if(r.text("requestID")!=id||r.text("messageType")!=type+"Response")throw std::runtime_error("Local API rejected "+type);return r.get("data");}
-    void authorize(const fs::path& file){auto d=identity();auto tok=load(file).text("token");if(!tok.empty()){d.set("authenticationToken",tok);if(call("Authentication",d).get("authenticated").boolean())return;}auto newtok=call("AuthenticationToken",identity(),65s).text("authenticationToken");if(newtok.empty())throw std::runtime_error("Approve Kawari Twitch in Plugins");d.set("authenticationToken",newtok);if(!call("Authentication",d).get("authenticated").boolean())throw std::runtime_error("Local API authorization failed");auto saved=J::obj();saved.set("token",newtok);atomic(file,saved.dump());}
+    S send(const S& type, const J& data) {
+        auto j = J::obj();
+        auto id = std::to_string(++seq);
+        j.set("apiName", "VTubeStudioPublicAPI");
+        j.set("apiVersion", "1.0");
+        j.set("requestID", id);
+        j.set("messageType", type + "Request");
+        j.set("data", data);
+        ws.send(j);
+        return id;
+    }
+    J reply(const J& response, const S& type, const S& id) {
+        if (response.text("requestID") != id) throw std::runtime_error("Unexpected Kawari API reply");
+        if (response.text("messageType") == "APIError")
+            throw ApiError(int(response.get("data").get("errorID").number()));
+        if (response.text("messageType") != type + "Response")
+            throw std::runtime_error("Unexpected Kawari API response type");
+        return response.get("data");
+    }
+    J call(const S& type, const J& data=J::obj()) {
+        auto id = send(type, data);
+        return reply(ws.recv(3s), type, id);
+    }
+    bool authenticate(const S& credential) {
+        auto data = identity();
+        data.set("authenticationToken", credential);
+        return call("Authentication", data).get("authenticated").boolean();
+    }
+    bool begin_authorization(const fs::path& file) {
+        auto credential = load(file).text("token");
+        if (!credential.empty() && authenticate(credential)) return true;
+        approval_request = send("AuthenticationToken", identity());
+        approval_deadline = Clock::now() + 65s;
+        return false;
+    }
+    bool poll_authorization(const fs::path& file) {
+        auto response = ws.poll();
+        if (!response.p) {
+            if (Clock::now() >= approval_deadline) throw ApprovalRequired("Plugin approval expired. Request approval again.");
+            return false;
+        }
+        J data;
+        try { data = reply(response, "AuthenticationToken", approval_request); }
+        catch (const ApiError& error) {
+            if (error.code != 50) throw;
+            throw ApprovalRequired("Plugin is not approved. Allow Kawari Twitch in Plugins, then request approval again.");
+        }
+        auto token = data.text("authenticationToken");
+        if (!safe_field(token) || !authenticate(token))
+            throw ApprovalRequired("Kawari Twitch authorization failed. Check Plugins and request approval again.");
+        auto saved = J::obj();
+        saved.set("token", token);
+        atomic(file, saved.dump());
+        approval_request.clear();
+        return true;
+    }
 };
 struct Dedup{std::set<S> seen;std::deque<S> order;S take(const J& m,const S& channel){auto p=m.get("payload"),e=p.get("event");if(m.get("metadata").text("message_type")!="notification"||p.get("subscription").text("type")!=Event||e.text("broadcaster_user_id")!=channel)return {};auto id=e.text("id"),r=e.get("reward").text("id");if(!safe_field(id)||!safe_field(r)||!seen.insert(id).second)return {};order.push_back(id);if(order.size()>4096){seen.erase(order.front());order.pop_front();}return r;}};
 bool valid_binding(const J& b){auto m=b.text("mode");auto d=b.get("duration").number(-1);return safe_field(b.text("expressionFile"))&&std::isfinite(d)&&((m=="timed"&&d>0&&d<=300)||((m=="toggle"||m=="on"||m=="off")&&d==0));}
 J binding(const S& expression,const S& mode,const S& duration){size_t used=0;auto d=std::stod(duration,&used);if(used!=duration.size()||!std::isfinite(d))throw std::runtime_error("Invalid duration");auto j=J::obj();j.set("expressionFile",expression);j.set("mode",mode);j.set("duration",J::num(mode=="timed"?d:0));if(!valid_binding(j))throw std::runtime_error("Invalid reward binding");return j;}
 struct Service {
-    fs::path mail,root;unsigned port;
-    S client,channel,login,model,model_name,status="Disconnected",note,code,url,device_code;
-    J token=J::obj(),rewards,expressions,bindings;
-    std::unique_ptr<Api> api;std::unique_ptr<WS> event;Dedup dedup;
-    S published;
-    Clock::time_point retry{},validate_at{},model_at{},device_at{},device_end{},last_event{};int interval=5,keepalive=40,backoff=5;bool enabled=false;
-    Service(fs::path m,fs::path r,unsigned p):mail(std::move(m)),root(std::move(r)),port(p){bindings=load(root/"bindings.json");token=load(root/"oauth.json");client=token.text("client_id");if(!client_id(client)){const char* e=getenv("KAWARI_TWITCH_CLIENT_ID");client=e&&client_id(e)?e:"";}enabled=load(root/"native-enabled.json").get("enabled").boolean();if(enabled&&!client_id(client))enabled=false;}
-    void publish(){S s="kawari-twitch-1\n";auto row=[&](std::initializer_list<S> cols){bool first=true;for(auto& c:cols){if(!first)s+='\t';s+=display(c);first=false;}s+='\n';};row({"S",status,note});row({"C",client,login,enabled?"1":"0"});row({"D",code,url});row({"M",model,model_name});for(auto& e:expressions.array())if(safe_field(e.text("file")))row({"E",e.text("file"),e.text("name")});auto b=bindings.get(model);std::set<S> listed;for(auto& r:rewards.array()){auto id=r.text("id");if(!safe_field(id))continue;listed.insert(id);auto a=b.get(id);row({"R",id,r.text("title"),std::to_string(int(std::clamp(r.get("cost").number(),0.,1000000000.))),a.text("expressionFile"),a.text("mode"),std::to_string(a.get("duration").number())});}for(auto& id:b.keys())if(!listed.count(id)&&safe_field(id)){auto a=b.get(id);row({"R",id,"Unavailable reward","",a.text("expressionFile"),a.text("mode"),std::to_string(a.get("duration").number())});}if(s!=published){atomic(mail/"twitch-ui.tsv",s);published=std::move(s);}}
-    void preference(bool on){auto j=J::obj();j.set("enabled",J(json_object_new_boolean(on)));atomic(root/"native-enabled.json",j.dump());enabled=on;}
-    J oauth(const S& endpoint,const S& data={}){return http(S(OAuth)+endpoint,data);}
-    J helix(const S& endpoint,const J& data=J()){std::vector<S> h={"Authorization: Bearer "+token.text("access_token"),"Client-Id: "+client};if(data.p)h.push_back("Content-Type: application/json");return http(S(Helix)+endpoint,data.p?data.dump():S(),h);}
-    void save_token(J t){if(!safe_field(t.text("access_token"))||!safe_field(t.text("refresh_token")))throw std::runtime_error("Invalid OAuth token response");t.set("client_id",client);atomic(root/"oauth.json",t.dump());token=std::move(t);}
-    void refresh(){auto r=token.text("refresh_token");if(!safe_field(r))throw std::runtime_error("Login required");save_token(oauth("token",form({{"client_id",client},{"grant_type","refresh_token"},{"refresh_token",r}})));}
-    void validate(){auto check=[&](){return http(S(OAuth)+"validate",{}, {"Authorization: OAuth "+token.text("access_token")});};if(token.text("client_id")!=client||!safe_field(token.text("access_token")))throw std::runtime_error("Login required");J v;try{v=check();}catch(const HttpError& e){if(e.status!=401)throw;refresh();v=check();}if(v.get("expires_in").number()<120){refresh();v=check();}bool scope=false;for(auto& s:v.get("scopes").array())scope|=s.text()==Scope;if(!scope||v.text("client_id")!=client||!safe_field(v.text("user_id")))throw std::runtime_error("Wrong account scope; log in again");if(!channel.empty()&&channel!=v.text("user_id"))throw std::runtime_error("Twitch account changed; disconnect first");channel=v.text("user_id");login=v.text("login");validate_at=Clock::now()+std::chrono::seconds(int(std::clamp(v.get("expires_in").number()-120,30.,1800.)));}
-    void refresh_rewards(){rewards=helix("channel_points/custom_rewards?broadcaster_id="+escape(channel)).get("data");}
-    void local(){if(api)return;const auto previous=status;status="Authorizing local API";note="Approve Kawari Twitch in Integrations > Plugins if requested";publish();auto a=std::make_unique<Api>(port);a->authorize(root/"kawari-token.json");api=std::move(a);status=previous;note.clear();}
-    bool current(){local();auto m=api->call("CurrentModel");if(!m.get("modelLoaded").boolean()){model.clear();model_name.clear();expressions=J();return false;}model=m.text("modelID");model_name=m.text("modelName");auto e=api->call("ExpressionState");if(e.text("modelID")!=model){model.clear();model_name.clear();expressions=J();return false;}expressions=e.get("expressions");return safe_field(model);}
-    void dispatch(const S& reward,const S& expected={}){if(!current()||(!expected.empty()&&model!=expected))throw std::runtime_error("Model changed or unavailable");auto b=bindings.get(model).get(reward);if(!b.object())return;if(!valid_binding(b))throw std::runtime_error("Invalid saved reward binding");auto d=J::parse(b.dump());d.set("modelID",model);api->call("KawariRewardExpression",d);note="Reward applied";}
-    void welcome(WS& w){auto m=w.recv(10s);if(m.get("metadata").text("message_type")!="session_welcome")throw std::runtime_error("Expected EventSub welcome");auto s=m.get("payload").get("session");keepalive=int(std::clamp(s.get("keepalive_timeout_seconds").number(30),10.,600.))+10;last_event=Clock::now();session=s.text("id");if(!safe_field(session))throw std::runtime_error("Missing EventSub session");}
-    S session;
-    void connect_event(){status="Connecting";publish();validate();local();current();auto w=std::make_unique<WS>(EventWS);welcome(*w);auto d=J::obj(),condition=J::obj(),transport=J::obj();d.set("type",Event);d.set("version","1");condition.set("broadcaster_user_id",channel);transport.set("method","websocket");transport.set("session_id",session);d.set("condition",condition);d.set("transport",transport);helix("eventsub/subscriptions",d);event=std::move(w);status="Connected";note.clear();try{refresh_rewards();}catch(const std::exception& e){note=e.what();}}
-    void start_login(){if(!client_id(client))throw std::runtime_error("Enter Twitch Client ID");event.reset();api.reset();channel.clear();login.clear();rewards=J();auto d=oauth("device",form({{"client_id",client},{"scopes",Scope}}));url=d.text("verification_uri");code=d.text("user_code");device_code=d.text("device_code");if(!verify_url(url)||!safe_field(code)||!safe_field(device_code)){code.clear();url.clear();device_code.clear();throw std::runtime_error("Invalid device authorization response");}interval=int(std::clamp(d.get("interval").number(5),5.,60.));device_end=Clock::now()+std::chrono::seconds(int(std::clamp(d.get("expires_in").number(600),1.,1800.)));device_at=Clock::now()+std::chrono::seconds(interval);status="Waiting for Twitch authorization";}
-    void cancel_device(){device_code.clear();code.clear();url.clear();}
-    void poll_login(){if(Clock::now()>=device_end){cancel_device();preference(false);status="Disconnected";note="Authorization expired";return;}if(Clock::now()<device_at)return;device_at=Clock::now()+std::chrono::seconds(interval);try{save_token(oauth("token",form({{"client_id",client},{"scopes",Scope},{"device_code",device_code},{"grant_type","urn:ietf:params:oauth:grant-type:device_code"}})));cancel_device();preference(true);retry={};status="Connecting";}catch(const HttpError& e){if(e.reason=="authorization_pending")return;if(e.reason=="slow_down"){interval+=5;device_at=Clock::now()+std::chrono::seconds(interval);return;}cancel_device();preference(false);status="Disconnected";note=e.what();}}
-    void disconnect(){preference(false);cancel_device();event.reset();api.reset();channel.clear();login.clear();model.clear();model_name.clear();expressions=J();rewards=J();status="Disconnected";note.clear();}
-    void request(const std::vector<S>& f){if(f.empty())return;note.clear();if(f[0]=="connect"&&f.size()==2){if(!client_id(f[1]))throw std::runtime_error("Invalid Client ID");if(enabled)disconnect();client=f[1];retry={};backoff=5;if(token.text("client_id")!=client||token.text("access_token").empty()){preference(false);start_login();enabled=true;}else preference(true);}
-        else if(f[0]=="disconnect"&&f.size()==1)disconnect();
-        else if(f[0]=="logout"&&f.size()==1){disconnect();fs::remove(root/"oauth.json");token=J::obj();note="Local OAuth removed; revoke app in Twitch settings if desired";}
-        else if(f[0]=="open"&&f.size()==1&&verify_url(url)){if(pid_t p=fork();p==0){execlp("xdg-open","xdg-open",url.c_str(),static_cast<char*>(nullptr));_exit(127);}else if(p<0)throw std::runtime_error("Cannot open browser");}
-        else if(f[0]=="refresh"&&f.size()==1&&event){refresh_rewards();current();}
-        else if((f[0]=="bind"||f[0]=="unbind"||f[0]=="test")&&((f[0]=="bind"&&f.size()==6)||(f[0]!="bind"&&f.size()==3))){if(!event)throw std::runtime_error("Connect Twitch first");if(!current()||model!=f[1]||!safe_field(f[2]))throw std::runtime_error("Model changed; select again");auto next=J::parse(bindings.dump());auto b=next.get(model);if(!b.object())b=J::obj();if(f[0]=="test"){dispatch(f[2],f[1]);return;}if(f[0]=="unbind")b.erase(f[2]);else{bool known=false;for(auto& e:expressions.array())known|=e.text("file")==f[3];if(!known)throw std::runtime_error("Unknown expression");bool reward_known=b.get(f[2]).object();for(auto& r:rewards.array())reward_known|=r.text("id")==f[2];if(!reward_known)throw std::runtime_error("Unknown reward");b.set(f[2],binding(f[3],f[4],f[5]));}next.set(model,b);atomic(root/"bindings.json",next.dump());bindings=std::move(next);note="Binding saved";}
-        else throw std::runtime_error("Invalid Twitch command");}
-    void tick(){int ignored=0;while(waitpid(-1,&ignored,WNOHANG)>0){}auto req=mail/"twitch-request.tsv";if(fs::exists(req)){try{auto s=read_private(req);fs::remove(req);if(!s.empty()&&s.back()=='\n')s.pop_back();if(s.find_first_of("\r\n")!=S::npos)throw std::runtime_error("Invalid request");request(fields(s));}catch(const std::exception& e){fs::remove(req);note=e.what();if(status=="Disconnected"||status=="Waiting for Twitch authorization"){if(device_code.empty())preference(false);}}publish();}
-        if(!enabled)return;
-        if(!device_code.empty()){poll_login();return;}
-        if(!event){if(Clock::now()<retry)return;connect_event();return;}
-        auto m=event->poll();if(m.p){last_event=Clock::now();backoff=5;auto kind=m.get("metadata").text("message_type");if(kind=="session_reconnect"){auto u=m.get("payload").get("session").text("reconnect_url");if(!reconnect_url(u))throw std::runtime_error("Unexpected reconnect URL");auto w=std::make_unique<WS>(u);welcome(*w);event=std::move(w);}else if(kind=="revocation"){disconnect();note="Twitch revoked subscription; connect again";}else if(kind=="notification"){auto r=dedup.take(m,channel);if(!r.empty()){try{dispatch(r);}catch(const std::exception& e){note=e.what();}}}}
-        if(!event)return;
-        if(Clock::now()-last_event>std::chrono::seconds(keepalive))throw std::runtime_error("EventSub keepalive timeout");
-        if(Clock::now()>=validate_at)validate();
-        if(Clock::now()>=model_at){model_at=Clock::now()+1s;current();}}
-    void run(){publish();auto next=Clock::now();while(fs::is_directory(mail)){try{tick();}catch(const HttpError& e){event.reset();api.reset();note=e.what();if(e.status==429)backoff=60;if(e.status==400||e.status==401||e.status==403){preference(false);cancel_device();status="Disconnected";}else{status="Reconnecting";retry=Clock::now()+std::chrono::seconds(backoff);backoff=std::min(60,backoff*2);}}catch(const std::exception& e){event.reset();api.reset();note=e.what();if(!device_code.empty()||note=="Login required"||note.find("Local API rejected ")==0||note=="Approve Kawari Twitch in Plugins"||note=="Local API authorization failed"){preference(false);cancel_device();status="Disconnected";}else{status="Reconnecting";retry=Clock::now()+std::chrono::seconds(backoff);backoff=std::min(60,backoff*2);}}if(Clock::now()>=next){publish();next=Clock::now()+250ms;}std::this_thread::sleep_for(30ms);}}
+    using Request = std::function<J(const S&, const S&, const std::vector<S>&)>;
+    using OpenSocket = std::function<std::unique_ptr<WS>(const S&)>;
+    fs::path mail, root;
+    unsigned port;
+    Request remote;
+    OpenSocket open_event;
+    S client, channel, login, model, model_name, status="Disconnected", note, local_note, code, url, device_code;
+    J token=J::obj(), rewards, expressions, bindings;
+    std::unique_ptr<Api> api, pending_api;
+    std::unique_ptr<WS> event, replacement;
+    Dedup dedup;
+    struct Redemption { S model, reward; Clock::time_point expires; };
+    std::deque<Redemption> redemptions;
+    S handoff_url, published;
+    Clock::time_point retry{}, validate_at{}, rewards_at{}, model_at{}, local_at{}, device_at{}, device_end{}, last_event{};
+    Clock::time_point handoff_deadline{}, handoff_at{}, welcome_deadline{};
+    std::chrono::seconds interval=5s, keepalive=35s, backoff=2s;
+    bool enabled=false, requesting_code=false, approval_blocked=false, save_enable_pending=false;
+    pid_t browser=-1;
+
+    Service(fs::path m, fs::path r, unsigned p, Request request=http,
+            OpenSocket open=[](const S& address){return std::make_unique<WS>(address);})
+        :mail(std::move(m)),root(std::move(r)),port(p),remote(std::move(request)),open_event(std::move(open)) {
+        bindings=load(root/"bindings.json");
+        auto preferences=load(root/"native-enabled.json");
+        try { token=load(root/"oauth.json"); }
+        catch (const std::exception&) { note="Saved Twitch login could not be read. Connect to sign in again."; }
+        client=preferences.text("client_id");
+        if (!client_id(client)) client=token.text("client_id");
+        if (!client_id(client)) {
+            const char* configured=getenv("KAWARI_TWITCH_CLIENT_ID");
+            client=configured&&client_id(configured)?configured:"";
+        }
+        enabled=preferences.get("enabled").boolean() && has_login();
+        if (preferences.get("enabled").boolean() && !enabled && note.empty())
+            note="Twitch sign-in is required. Click Connect.";
+    }
+
+    bool has_login() const {
+        return client_id(client)&&token.text("client_id")==client&&safe_field(token.text("access_token"));
+    }
+    void publish() {
+        S s="kawari-twitch-1\n";
+        auto row=[&](std::initializer_list<S> cols){
+            bool first=true;
+            for (auto& value:cols) { if(!first)s+='\t';s+=display(value);first=false; }
+            s+='\n';
+        };
+        auto remaining=[](Clock::time_point until){
+            return std::to_string(std::max(0s,std::chrono::ceil<std::chrono::seconds>(until-Clock::now())).count());
+        };
+        row({"S",status,note});
+        row({"C",client,login,enabled?"1":"0"});
+        row({"D",code,url});
+        row({"T",device_code.empty()?"":remaining(device_end),status=="Reconnecting"?remaining(retry):""});
+        row({"L",local_note,approval_blocked?"1":"0",api?"1":"0"});
+        row({"M",model,model_name});
+        for (auto& e:expressions.array()) if(safe_field(e.text("file"))) row({"E",e.text("file"),e.text("name")});
+        auto b=bindings.get(model);
+        std::set<S> listed;
+        for (auto& reward:rewards.array()) {
+            auto id=reward.text("id");
+            if (!safe_field(id)) continue;
+            listed.insert(id);
+            auto a=b.get(id);
+            auto cost=reward.get("cost").number();
+            row({"R",id,reward.text("title"),std::to_string(int(std::isfinite(cost)?std::clamp(cost,0.,1000000000.):0.)),
+                 a.text("expressionFile"),a.text("mode"),std::to_string(a.get("duration").number())});
+        }
+        for (auto& id:b.keys()) if(!listed.count(id)&&safe_field(id)) {
+            auto a=b.get(id);
+            row({"R",id,"Unavailable reward","",a.text("expressionFile"),a.text("mode"),std::to_string(a.get("duration").number())});
+        }
+        if (s!=published) {atomic(mail/"twitch-ui.tsv",s);published=std::move(s);}
+    }
+    void preference(bool on) {
+        auto j=J::obj();
+        j.set("enabled",J(json_object_new_boolean(on)));
+        j.set("client_id",client);
+        atomic(root/"native-enabled.json",j.dump());
+        enabled=on;
+    }
+    J oauth(const S& endpoint,const S& data={}) {return remote(S(OAuth)+endpoint,data,{});}
+    void save_token(J t) {
+        if (!safe_field(t.text("access_token")) || !safe_field(t.text("refresh_token")))
+            throw std::runtime_error("Invalid OAuth token response");
+        t.set("client_id",client);
+        // Twitch rotates device-flow refresh tokens. Keep the new token in memory even
+        // if the first disk write fails, then retry that write before another refresh.
+        token=std::move(t);
+        token_dirty=true;
+        persist_token();
+    }
+    bool token_dirty=false;
+    void persist_token() {
+        if (!token_dirty) return;
+        atomic(root/"oauth.json",token.dump());
+        token_dirty=false;
+    }
+    void refresh() {
+        persist_token();
+        auto refresh_token=token.text("refresh_token");
+        if (!safe_field(refresh_token)) throw LoginRequired("Your Twitch login expired. Click Connect to sign in.");
+        try {
+            save_token(oauth("token",form({{"client_id",client},{"grant_type","refresh_token"},{"refresh_token",refresh_token}})));
+        } catch (const HttpError& e) {
+            if (e.status==400||e.status==401)
+                throw LoginRequired("Your Twitch login expired or was revoked. Click Connect to sign in.");
+            throw;
+        }
+    }
+    J helix(const S& endpoint,const J& data=J()) {
+        auto send=[&](){
+            std::vector<S> headers={"Authorization: Bearer "+token.text("access_token"),"Client-Id: "+client};
+            if(data.p)headers.push_back("Content-Type: application/json");
+            return remote(S(Helix)+endpoint,data.p?data.dump():S(),headers);
+        };
+        try {return send();}
+        catch (const HttpError& e) {if(e.status!=401)throw;}
+        refresh();
+        try {return send();}
+        catch (const HttpError& e) {
+            if(e.status==401)throw LoginRequired("Twitch refused the refreshed login. Click Connect to sign in.");
+            throw;
+        }
+    }
+    void validate() {
+        if (!has_login()) throw LoginRequired("Click Connect to sign in to Twitch.");
+        persist_token();
+        auto check=[&](){return remote(S(OAuth)+"validate",{},{"Authorization: OAuth "+token.text("access_token")});};
+        J v;
+        try {v=check();}
+        catch (const HttpError& e) {
+            if (e.status!=401) throw;
+            refresh();
+            try {v=check();}
+            catch (const HttpError& second) {
+                if (second.status==401) throw LoginRequired("Twitch refused the refreshed login. Click Connect to sign in.");
+                throw;
+            }
+        }
+        bool scope=false;
+        for (auto& field:v.get("scopes").array()) scope|=field.text()==Scope;
+        if (!scope||v.text("client_id")!=client||!safe_field(v.text("user_id")))
+            throw LoginRequired("Twitch authorization is missing Channel Points access. Click Connect to sign in.");
+        if (!channel.empty()&&channel!=v.text("user_id"))
+            throw LoginRequired("The Twitch account changed. Click Connect to sign in.");
+        channel=v.text("user_id");
+        login=v.text("login");
+        auto expires=v.get("expires_in").number(1800);
+        validate_at=Clock::now()+std::chrono::seconds(int(std::isfinite(expires)?std::clamp(expires,5.,1800.):1800.));
+    }
+    void refresh_rewards() {
+        rewards=helix("channel_points/custom_rewards?broadcaster_id="+escape(channel)).get("data");
+    }
+
+    void local() {
+        if (api||approval_blocked) return;
+        const auto credential=root/"kawari-token.json";
+        if (!pending_api) {
+            pending_api=std::make_unique<Api>(port);
+            if (!pending_api->begin_authorization(credential)) {
+                local_note="Allow Kawari Twitch in Integrations > Plugins. Twitch can stay connected while you approve it.";
+                return;
+            }
+        } else if (!pending_api->poll_authorization(credential)) {
+            return;
+        }
+        api=std::move(pending_api);
+        local_note.clear();
+    }
+    void clear_model() {model.clear();model_name.clear();expressions=J();}
+    bool current() {
+        local();
+        if (!api) return false;
+        auto m=api->call("CurrentModel");
+        if (!m.get("modelLoaded").boolean()) {clear_model();return false;}
+        auto e=api->call("ExpressionState");
+        if (e.text("modelID")!=m.text("modelID")) {clear_model();return false;}
+        model=m.text("modelID");
+        model_name=m.text("modelName");
+        expressions=e.get("expressions");
+        return safe_field(model);
+    }
+    void activate(const S& reward) {
+        auto b=bindings.get(model).get(reward);
+        if (!b.object()) return;
+        if (!valid_binding(b)) throw std::runtime_error("Invalid saved reward binding");
+        auto d=J::parse(b.dump());
+        d.set("modelID",model);
+        api->call("KawariRewardExpression",d);
+        note="Reward applied";
+    }
+    void dispatch(const S& reward,const S& expected={}) {
+        if (!current()||(!expected.empty()&&model!=expected)) throw std::runtime_error("Model changed or unavailable");
+        activate(reward);
+    }
+    void process_redemptions() {
+        while (!redemptions.empty()&&redemptions.front().expires<=Clock::now()) redemptions.pop_front();
+        if (redemptions.empty()||!api) return;
+        if (!current()) return;
+        auto next=std::move(redemptions.front());
+        // An action that may have reached Kawari must not be replayed after a lost reply.
+        redemptions.pop_front();
+        if (next.model==model&&next.expires>Clock::now()) {
+            try {activate(next.reward);}
+            catch (const ApiError& e) {
+                if(e.code==8)throw;
+                note="Kawari could not apply this reward. Check the saved expression.";
+            }
+        }
+    }
+    void update_local() {
+        if (Clock::now()<local_at||approval_blocked) return;
+        try {
+            local();
+            if (!api) return;
+            if (Clock::now()>=model_at) {model_at=Clock::now()+1s;current();}
+            process_redemptions();
+        } catch (const ApprovalRequired& e) {
+            pending_api.reset();
+            approval_blocked=true;
+            local_note=e.what();
+        } catch (const std::exception& e) {
+            api.reset();
+            pending_api.reset();
+            local_at=Clock::now()+2s;
+            local_note=S("Reconnecting to Kawari: ")+e.what();
+        }
+    }
+
+    struct Session { S id; std::chrono::seconds timeout; };
+    static Session welcome(const J& m) {
+        if (m.get("metadata").text("message_type")!="session_welcome")
+            throw std::runtime_error("Expected EventSub welcome");
+        auto session=m.get("payload").get("session");
+        auto id=session.text("id");
+        if (!safe_field(id)) throw std::runtime_error("Missing EventSub session");
+        auto duration=session.get("keepalive_timeout_seconds").number(30);
+        return {id,std::chrono::seconds(int(std::isfinite(duration)?std::clamp(duration,10.,600.):30.))+5s};
+    }
+    void connected(std::unique_ptr<WS> socket,const Session& session) {
+        event=std::move(socket);
+        keepalive=session.timeout;
+        last_event=Clock::now();
+        status="Connected";
+        note.clear();
+    }
+    void connect_event() {
+        status="Connecting";
+        publish();
+        persist_token();
+        if (save_enable_pending) {
+            preference(true);
+            save_enable_pending=false;
+        }
+        if (Clock::now()>=validate_at||channel.empty()) validate();
+        auto w=open_event(EventWS);
+        auto session=welcome(w->recv(10s));
+        auto d=J::obj(),condition=J::obj(),transport=J::obj();
+        d.set("type",Event);d.set("version","1");
+        condition.set("broadcaster_user_id",channel);
+        transport.set("method","websocket");transport.set("session_id",session.id);
+        d.set("condition",condition);d.set("transport",transport);
+        helix("eventsub/subscriptions",d);
+        connected(std::move(w),session);
+        rewards_at=Clock::now();
+    }
+    void clear_handoff() {handoff_url.clear();replacement.reset();}
+    void start_handoff(const S& address) {
+        if (!reconnect_url(address)) throw std::runtime_error("Unexpected EventSub reconnect URL");
+        if (!handoff_url.empty()) return;
+        handoff_url=address;
+        handoff_at=Clock::now();
+        handoff_deadline=handoff_at+30s;
+        note="Twitch is moving the EventSub connection.";
+    }
+    void update_handoff() {
+        const auto now=Clock::now();
+        if (now>=handoff_deadline) throw std::runtime_error("EventSub did not complete the server handoff");
+        try {
+            if (!replacement) {
+                if (now<handoff_at) return;
+                replacement=open_event(handoff_url);
+                welcome_deadline=Clock::now()+8s;
+            }
+            auto message=replacement->poll();
+            if (message.p) {
+                auto session=welcome(message);
+                auto socket=std::move(replacement);
+                // Drain buffered notifications from the old socket before swapping it.
+                poll_events();
+                if (enabled) connected(std::move(socket),session);
+                clear_handoff();
+            } else if (Clock::now()>=welcome_deadline) {
+                throw std::runtime_error("Timed out waiting for the new EventSub socket");
+            }
+        } catch (const std::exception&) {
+            replacement.reset();
+            handoff_at=Clock::now()+1s;
+        }
+    }
+    void begin_retry(const S& reason,std::chrono::seconds delay=0s) {
+        event.reset();
+        clear_handoff();
+        note=reason;
+        status="Reconnecting";
+        retry=Clock::now()+std::max(delay,backoff);
+        backoff=std::min(60s,backoff*2);
+    }
+    void event_message(const J& message) {
+        last_event=Clock::now();
+        auto kind=message.get("metadata").text("message_type");
+        if (kind=="session_keepalive"||kind=="notification") backoff=2s;
+        if (kind=="session_reconnect") {
+            start_handoff(message.get("payload").get("session").text("reconnect_url"));
+        } else if (kind=="revocation") {
+            auto reason=message.get("payload").get("subscription").text("status");
+            if (reason=="authorization_revoked") {
+                sign_in_required("Twitch revoked authorization. Click Connect to sign in again.");
+            } else {
+                disconnect();
+                note="Twitch removed this Channel Points subscription. Check your channel and reconnect.";
+            }
+        } else if (kind=="notification") {
+            auto reward=dedup.take(message,channel);
+            if (!reward.empty()&&!model.empty()&&bindings.get(model).get(reward).object()) {
+                if(redemptions.size()>=64)redemptions.pop_front();
+                redemptions.push_back({model,std::move(reward),Clock::now()+20s});
+            }
+        }
+    }
+
+    void start_login() {
+        if (!client_id(client)) throw std::runtime_error("Enter a public Twitch Client ID");
+        auto d=oauth("device",form({{"client_id",client},{"scopes",Scope}}));
+        auto address=d.text("verification_uri"), user_code=d.text("user_code"), secret=d.text("device_code");
+        if (!verify_url(address)||!safe_field(user_code)||!safe_field(secret))
+            throw std::runtime_error("Invalid device authorization response");
+        url=std::move(address);code=std::move(user_code);device_code=std::move(secret);
+        auto seconds=d.get("interval").number(5);
+        auto expires=d.get("expires_in").number(600);
+        interval=std::chrono::seconds(int(std::isfinite(seconds)?std::clamp(seconds,1.,1800.):5.));
+        device_end=Clock::now()+std::chrono::seconds(int(std::isfinite(expires)?std::clamp(expires,1.,1800.):600.));
+        device_at=Clock::now()+interval;
+        status="Waiting for Twitch authorization";
+        enabled=true;
+    }
+    void cancel_device() {device_code.clear();code.clear();url.clear();}
+    void delay_login(std::chrono::seconds delay) {
+        device_at=Clock::now()+std::max(interval,delay);
+        note="Twitch is temporarily unavailable. Retrying the same sign-in code.";
+    }
+    void poll_login() {
+        if (Clock::now()>=device_end) {
+            disconnect();
+            note="The Twitch code expired. Click Connect for a new code.";
+            return;
+        }
+        if (Clock::now()<device_at) return;
+        J credentials;
+        try {
+            credentials=oauth("token",form({{"client_id",client},{"scopes",Scope},{"device_code",device_code},
+                            {"grant_type","urn:ietf:params:oauth:grant-type:device_code"}}));
+        } catch (const TransportError&) {delay_login(interval*2);return;}
+        catch (const HttpError& e) {
+            if (e.reason=="authorization_pending") {device_at=Clock::now()+interval;return;}
+            if (e.reason=="slow_down") {interval+=5s;device_at=Clock::now()+interval;return;}
+            if (e.temporary()) {delay_login(e.retry_after);return;}
+            disconnect();
+            note="Twitch did not complete sign-in. Click Connect to get a new code.";
+            return;
+        }
+        // The exchange consumed the one-time device code even if writing the token fails.
+        cancel_device();
+        status="Connecting";
+        note.clear();
+        save_enable_pending=true;
+        save_token(std::move(credentials));
+        preference(true);
+        save_enable_pending=false;
+        retry={};
+    }
+    void open_browser() {
+        if (!verify_url(url)) return;
+        if (browser>0) return;
+        browser=fork();
+        if (browser==0) {
+            execlp("xdg-open","xdg-open",url.c_str(),static_cast<char*>(nullptr));
+            _exit(127);
+        }
+        if (browser<0) note="Could not open the browser. Copy the authorization link.";
+    }
+    void check_browser() {
+        if (browser<=0) return;
+        int result=0;
+        if (waitpid(browser,&result,WNOHANG)!=browser) return;
+        browser=-1;
+        if (!device_code.empty()&&(!WIFEXITED(result)||WEXITSTATUS(result)!=0))
+            note="Could not open the browser. Copy the authorization link.";
+    }
+    void disconnect() {
+        enabled=false;
+        requesting_code=false;
+        save_enable_pending=false;
+        cancel_device();
+        event.reset();clear_handoff();
+        api.reset();pending_api.reset();approval_blocked=false;local_note.clear();
+        channel.clear();login.clear();clear_model();rewards=J();redemptions.clear();
+        validate_at={};local_at={};model_at={};retry={};backoff=2s;
+        status="Disconnected";note.clear();
+        try {preference(false);}
+        catch (const std::exception&) {note="Disconnected. Could not save the Twitch preference.";}
+    }
+    bool forget_login() {
+        std::error_code error;
+        fs::remove(root/"oauth.json",error);
+        token=J::obj();
+        token_dirty=false;
+        return !error;
+    }
+    void sign_in_required(const S& reason) {
+        disconnect();
+        status="Sign-in required";
+        note=reason;
+        if (!forget_login()) note+=" Kawari could not remove the old login file.";
+    }
+    void request(const std::vector<S>& f) {
+        if (f.empty()) return;
+        if (f[0]=="connect"&&f.size()==2) {
+            auto first=f[1].find_first_not_of(' ');
+            auto entered=first==S::npos?S():f[1].substr(first,f[1].find_last_not_of(' ')-first+1);
+            if (!client_id(entered)) throw std::runtime_error("Invalid Client ID");
+            disconnect();
+            client=std::move(entered);
+            if (has_login()) preference(true);
+            else {
+                preference(false);
+                enabled=true;
+                requesting_code=true;
+                status="Requesting a Twitch sign-in code";
+            }
+        } else if (f[0]=="disconnect"&&f.size()==1) {
+            disconnect();
+        } else if (f[0]=="logout"&&f.size()==1) {
+            disconnect();
+            note=forget_login()?"Local OAuth removed":"Could not remove the saved Twitch login.";
+        } else if (f[0]=="open"&&f.size()==1&&verify_url(url)) {
+            open_browser();
+        } else if (f[0]=="approve"&&f.size()==1&&enabled) {
+            approval_blocked=false;
+            pending_api.reset();
+            local_at={};
+            local_note.clear();
+        } else if (f[0]=="refresh"&&f.size()==1&&event) {
+            rewards_at=Clock::now();
+            model_at={};
+        } else if ((f[0]=="bind"||f[0]=="unbind"||f[0]=="test")&&
+                   ((f[0]=="bind"&&f.size()==6)||(f[0]!="bind"&&f.size()==3))) {
+            if (!event) throw std::runtime_error("Connect Twitch first");
+            if (!current()||model!=f[1]||!safe_field(f[2])) throw std::runtime_error("Model changed; select again");
+            if (f[0]=="test") {activate(f[2]);return;}
+            auto next=J::parse(bindings.dump());
+            auto b=next.get(model);
+            if (!b.object()) b=J::obj();
+            if (f[0]=="unbind") b.erase(f[2]);
+            else {
+                bool known=false;
+                for (auto& e:expressions.array()) known|=e.text("file")==f[3];
+                if (!known) throw std::runtime_error("Unknown expression");
+                bool reward_known=b.get(f[2]).object();
+                for (auto& r:rewards.array()) reward_known|=r.text("id")==f[2];
+                if (!reward_known) throw std::runtime_error("Unknown reward");
+                b.set(f[2],binding(f[3],f[4],f[5]));
+            }
+            next.set(model,b);
+            atomic(root/"bindings.json",next.dump());
+            bindings=std::move(next);
+            note="Binding saved";
+        } else {
+            throw std::runtime_error("Invalid Twitch command");
+        }
+    }
+    void poll_request() {
+        auto req=mail/"twitch-request.tsv";
+        if (!fs::exists(req)) return;
+        bool consumed=false;
+        try {
+            auto s=read_private(req);
+            fs::remove(req);
+            consumed=true;
+            if (!s.empty()&&s.back()=='\n') s.pop_back();
+            if (s.find_first_of("\r\n")!=S::npos) throw std::runtime_error("Invalid request");
+            request(fields(s));
+        } catch (const std::exception& e) {
+            if (!consumed) {
+                std::error_code ignored;
+                fs::remove(req,ignored);
+            }
+            note=e.what();
+        }
+        publish();
+    }
+    void poll_events() {
+        for (int i=0;event&&i<8;++i) {
+            J message;
+            try {message=event->poll();}
+            catch (const std::exception&) {
+                if (handoff_url.empty()) throw;
+                event.reset();
+                break;
+            }
+            if (!message.p) break;
+            event_message(message);
+        }
+    }
+    void update_remote() {
+        if (!event&&handoff_url.empty()) {
+            if (Clock::now()>=retry) connect_event();
+            return;
+        }
+        poll_events();
+        if (!enabled) return;
+        if (!handoff_url.empty()) {update_handoff();return;}
+        if (!event) return;
+        if (Clock::now()-last_event>keepalive) throw std::runtime_error("EventSub keepalive timed out");
+        if (Clock::now()>=validate_at) {
+            try {validate();}
+            catch (const LoginRequired&) {throw;}
+            catch (const HttpError& e) {
+                if (!e.temporary()) throw;
+                validate_at=Clock::now()+std::max(15s,e.retry_after);
+                note="Twitch could not validate the login yet. Retrying.";
+            } catch (const TransportError&) {
+                validate_at=Clock::now()+15s;
+                note="Twitch could not validate the login yet. Retrying.";
+            }
+        }
+        if (Clock::now()>=rewards_at) {
+            try {refresh_rewards();rewards_at=Clock::now()+5min;}
+            catch (const LoginRequired&) {throw;}
+            catch (const HttpError& e) {
+                rewards_at=Clock::now()+std::max(60s,e.retry_after);
+                note=e.status==403?"Twitch did not grant access to this channel's rewards.":"Could not refresh Channel Points rewards.";
+            } catch (const std::exception&) {
+                rewards_at=Clock::now()+60s;
+                note="Could not refresh Channel Points rewards.";
+            }
+        }
+    }
+    void tick() {
+        check_browser();
+        poll_request();
+        if (!enabled) return;
+        try {
+            if (requesting_code) {
+                if (Clock::now()>=retry) {
+                    start_login();
+                    requesting_code=false;
+                    open_browser();
+                }
+                return;
+            }
+            if (!device_code.empty()) {poll_login();return;}
+            update_remote();
+        } catch (const LoginRequired& e) {
+            sign_in_required(e.what());
+        } catch (const HttpError& e) {
+            if (!e.temporary()) {
+                const bool sign_in=requesting_code;
+                disconnect();
+                if (sign_in) note="Twitch rejected sign-in. Check the Client ID and confirm the app is Public.";
+                else if (e.status==403) note="Twitch refused the Channel Points subscription. Check channel eligibility and app permissions.";
+                else note=S(e.what())+". Check the Twitch app and reconnect.";
+            } else {
+                begin_retry(e.status==429?"Twitch temporarily limited requests.":e.what(),e.retry_after);
+            }
+        } catch (const std::exception& e) {
+            if (!device_code.empty()) {disconnect();note=e.what();}
+            else begin_retry(e.what());
+        }
+        if (enabled&&device_code.empty()&&!channel.empty()) update_local();
+    }
+    void run() {
+        publish();
+        auto next=Clock::now();
+        while (fs::is_directory(mail)) {
+            tick();
+            if (Clock::now()>=next) {publish();next=Clock::now()+250ms;}
+            std::this_thread::sleep_for(30ms);
+        }
+    }
 };
 int main(int argc,char** argv){try{if(curl_global_init(CURL_GLOBAL_DEFAULT)!=CURLE_OK)throw std::runtime_error("libcurl initialization failed");if(argc==2&&S(argv[1])=="--check"){bool ws=false,wss=false;for(auto p=curl_version_info(CURLVERSION_NOW)->protocols;*p;++p){ws|=S(*p)=="ws";wss|=S(*p)=="wss";}if(!ws||!wss)throw std::runtime_error("libcurl must support ws and wss");std::cout<<"Kawari native Twitch protocol 1\n";return 0;}if(argc!=4)throw std::runtime_error("Usage: kawari-twitch MAILBOX DATA_DIR PORT");umask(077);fs::path mail=argv[1],root=fs::path(argv[2])/"twitch";private_dir(mail);fs::create_directories(root);private_dir(root);Fd lock(open((root/"bridge.lock").c_str(),O_CREAT|O_RDWR|O_NOFOLLOW|O_CLOEXEC,0600));if(lock.n<0||flock(lock.n,LOCK_EX|LOCK_NB))throw std::runtime_error("Another Twitch bridge is running");unsigned port=std::stoul(argv[3]);if(!port||port>65535)throw std::runtime_error("Invalid API port");Service service(mail,root,port);service.run();return 0;}catch(const std::exception& e){std::cerr<<"[twitch] "<<e.what()<<'\n';return 1;}}

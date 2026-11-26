@@ -685,7 +685,8 @@ std::chrono::steady_clock::time_point plugin_poll;
 struct TwitchReward {std::string id,title,cost,file,mode,duration;};
 struct TwitchUi {
     std::string dir,status,note,login,code,url,model,modelName,reward,selectionKey,file,requestError;
-    char client[129]{};bool enabled=false,ready=false,clientInitialized=false;
+    std::string codeRemaining,retryRemaining,localNote;
+    char client[129]{};bool enabled=false,ready=false,clientInitialized=false,approvalBlocked=false,localReady=false;
     int mode=0;float duration=60.f;
     std::vector<TwitchReward> rewards;std::vector<std::pair<std::string,std::string>> expressions;
     std::map<std::string,UiExpressionTimer> timers;
@@ -700,14 +701,19 @@ void twitch_panel(){
     if(now>=t.next){t.next=now+std::chrono::milliseconds(250);std::ifstream f(dir+"/twitch-ui.tsv");std::string line;
         t.ready=!dir.empty()&&bool(std::getline(f,line))&&line=="kawari-twitch-1";
         if(t.ready){t.rewards.clear();t.expressions.clear();t.code.clear();t.url.clear();t.model.clear();t.modelName.clear();t.login.clear();t.enabled=false;
+            t.codeRemaining.clear();t.retryRemaining.clear();t.localNote.clear();t.approvalBlocked=false;
+            bool localReported=false;
             while(std::getline(f,line)){auto v=twitch_fields(line);if(v.empty())continue;
                 if(v[0]=="S"&&v.size()==3){t.status=v[1];t.note=v[2];}
                 else if(v[0]=="C"&&v.size()==4){if(!t.clientInitialized){if(!v[1].empty())std::snprintf(t.client,sizeof(t.client),"%s",v[1].c_str());t.clientInitialized=true;}t.login=v[2];t.enabled=v[3]=="1";}
                 else if(v[0]=="D"&&v.size()==3){t.code=v[1];t.url=v[2];}
+                else if(v[0]=="T"&&v.size()==3){t.codeRemaining=v[1];t.retryRemaining=v[2];}
+                else if(v[0]=="L"&&v.size()==4){t.localNote=v[1];t.approvalBlocked=v[2]=="1";t.localReady=v[3]=="1";localReported=true;}
                 else if(v[0]=="M"&&v.size()==3){t.model=v[1];t.modelName=v[2];}
                 else if(v[0]=="E"&&v.size()==3)t.expressions.emplace_back(v[1],v[2]);
                 else if(v[0]=="R"&&v.size()==7)t.rewards.push_back({v[1],v[2],v[3],v[4],v[5],v[6]});
             }
+            if(!localReported)t.localReady=t.status=="Connected";
         }
         t.timers.clear();const auto expression_dir_now=expression_ui_directory();
         if(t.ready&&!expression_dir_now.empty()){std::ifstream timers(expression_dir_now+"/expression-ui.tsv");t.timers=ui_expression_timers(timers,t.model);}
@@ -716,13 +722,29 @@ void twitch_panel(){
     auto request=[&](const std::string& text){if(t.dir.empty())return;auto base=t.dir+"/twitch-request";std::ifstream prev(base+".tsv");if(prev){t.requestError="Previous command pending";return;}std::ofstream out(base+".tmp",std::ios::trunc);out<<text<<'\n';out.close();if(!out||chmod((base+".tmp").c_str(),0600)!=0||std::rename((base+".tmp").c_str(),(base+".tsv").c_str())!=0){t.requestError="Cannot send command";return;}t.requestError.clear();};
     ImGui::TextUnformatted("Twitch");ImGui::TextWrapped("%s",t.status.c_str());if(!t.login.empty())ImGui::TextUnformatted(t.login.c_str());if(!t.note.empty())ImGui::TextWrapped("%s",t.note.c_str());
     if(t.status=="Unavailable")return;
-    ImGui::BeginDisabled(t.enabled);ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##client_id","Twitch Client ID",t.client,sizeof(t.client));ImGui::EndDisabled();
-    if(!t.enabled){if(ImGui::Button("Connect"))request(std::string("connect\t")+t.client);ImGui::SameLine();if(ImGui::Button("Forget login"))request("logout");}
-    else if(ImGui::Button("Disconnect"))request("disconnect");
-    if(!t.code.empty()){ImGui::Separator();ImGui::TextWrapped("Code: %s",t.code.c_str());if(ImGui::Button("Copy code"))ImGui::SetClipboardText(t.code.c_str());ImGui::SameLine();if(ImGui::Button("Open Twitch"))request("open");ImGui::TextWrapped("%s",t.url.c_str());}
+    ImGui::BeginDisabled(t.enabled);ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##client_id","Public Twitch app Client ID",t.client,sizeof(t.client));ImGui::EndDisabled();
+    if(!t.enabled){
+        ImGui::BeginDisabled(t.client[0]=='\0');
+        if(ImGui::Button("Connect"))request(std::string("connect\t")+t.client);
+        ImGui::EndDisabled();
+        ImGui::SameLine();if(ImGui::Button("Forget login"))request("logout");
+    }else if(ImGui::Button(t.code.empty()?"Disconnect":"Cancel sign-in"))request("disconnect");
+    if(!t.code.empty()){
+        ImGui::Separator();
+        ImGui::TextWrapped("Twitch code: %s",t.code.c_str());
+        if(!t.codeRemaining.empty())ImGui::TextDisabled("Expires in %s s",t.codeRemaining.c_str());
+        if(ImGui::Button("Open Twitch"))request("open");
+        ImGui::SameLine();if(ImGui::Button("Copy code"))ImGui::SetClipboardText(t.code.c_str());
+        ImGui::SameLine();if(ImGui::Button("Copy link"))ImGui::SetClipboardText(t.url.c_str());
+    }
+    if(!t.retryRemaining.empty()&&t.retryRemaining!="0")
+        ImGui::TextDisabled("Retry in %s s",t.retryRemaining.c_str());
+    if(!t.localNote.empty())ImGui::TextWrapped("%s",t.localNote.c_str());
+    if(t.approvalBlocked&&ImGui::Button("Request plugin approval"))request("approve");
     if(!t.requestError.empty())ImGui::TextWrapped("%s",t.requestError.c_str());
     if(t.status!="Connected")return;
     ImGui::Separator();ImGui::TextUnformatted("Channel Points");ImGui::SameLine();if(ImGui::SmallButton("Refresh"))request("refresh");
+    if(!t.localReady){ImGui::TextDisabled("Waiting for the Kawari plugin");return;}
     if(t.model.empty()){ImGui::TextDisabled("Waiting for model");return;}ImGui::TextDisabled("Model: %s",t.modelName.c_str());
     if(t.rewards.empty()){ImGui::TextDisabled("No rewards available");return;}
     timespec ts{};const bool clock_ok=clock_gettime(CLOCK_MONOTONIC,&ts)==0;
