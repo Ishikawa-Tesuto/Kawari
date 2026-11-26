@@ -35,38 +35,29 @@ sudo pacman -S --needed \
   libpng giflib ttf-dejavu
 ```
 
-### 2. Set up Cubism SDK and libfunnel
+### 2. Set up the Cubism SDK
 
 Download **Cubism 5 SDK for Native R5** (`5-r.5`). The extracted SDK root should contain `Core`, `Framework`, and `Samples`. Place it in `vendor/cubism-sdk` or set `CUBISM_SDK_ROOT` to its location. [Download the SDK from Live2D](https://www.live2d.com/en/sdk/download/native/)
 
-From the project root, clone libfunnel if `vendor/libfunnel` is missing. Kawari's build requires the revision shown below.
+### 3. Build Kawari
+
+Run this command from the project root to build the renderer, application core, and WebSocket API with PipeWire support.
 
 ```bash
-git clone https://github.com/hoshinolina/libfunnel.git vendor/libfunnel
-git -C vendor/libfunnel checkout --detach 4f049b39264afae316f5e04738957b462403bb49
-git -C vendor/libfunnel submodule update --init --recursive
+./scripts/build.sh
 ```
 
-### 3. Build the renderer and core
-
-Run these commands from the project root.
-
-```bash
-./scripts/build.sh --with-broadcast
-./scripts/build-core.sh
-```
-
-The renderer build patches a copy of the Cubism SDK in `build/sdk`. The first build may need GitHub access to fetch Dear ImGui and GLFW. If you update the SDK in place, refresh the build copy with `./scripts/build.sh --clean-native --with-broadcast`.
+The build patches a copy of the Cubism SDK in `build/sdk` and fetches pinned dependencies such as libfunnel and Dear ImGui when needed. If you update the SDK or move it, run `./scripts/build.sh --clean-native`.
 
 ## First launch
 
-Pass the path to your model's original `.model3.json` file. `STUDIO_HOT_SWITCH=1` enables in-session model switching while preview and PipeWire output are active.
+Run Kawari from the project root. On the first launch, it opens Haru from the Cubism SDK. On later launches, it opens the last available model.
 
 ```bash
-STUDIO_HOT_SWITCH=1 ./scripts/run-kawari.sh "$HOME/Models/MyModel/MyModel.model3.json"
+./scripts/run-kawari.sh
 ```
 
-On later launches, Kawari can reopen the last model when you omit the path. Use `--library-dir` to add a model directory to the library, or run `./scripts/run-kawari.sh --help` for all launch options.
+Open **Model Library** to switch to your own model. You can also pass its original `.model3.json` path to `./scripts/run-kawari.sh` or use `--library-dir` to add a folder of models. Run `./scripts/run-kawari.sh --help` for all launch options.
 
 To launch Kawari from your desktop's application menu, install the launcher and its icon. Run the command again if you move the project folder.
 
@@ -77,7 +68,7 @@ To launch Kawari from your desktop's application menu, install the launcher and 
 ## Stream to OBS
 
 1. Install the PipeWire video source plugin for OBS. [obs-pwvideo](https://github.com/hoshinolina/obs-pwvideo)
-2. Launch a Kawari build with PipeWire support.
+2. Start Kawari.
 3. Add the plugin's PipeWire video source in OBS and select **Live2D**.
 
 Set the stream resolution and target frame rate under **Settings → Broadcast**. Changes to either setting take effect the next time you start Kawari. Run `./scripts/broadcast-status.sh` to check whether Kawari is publishing the stream.
@@ -93,13 +84,3 @@ Use `--no-preview` to stream with the preview window hidden. If you saved that m
 ## Data and settings
 
 Kawari stores its data in `~/.local/share/kawari/` by default, or in `$XDG_DATA_HOME/kawari/` when that variable is set. Each model has a separate profile under `profiles/` for its parameters, expressions, and hotkeys. Interface settings, broadcast settings, and scene items are shared across models. Kawari treats your original model files as read-only.
-
-## Development
-
-The application core and WebSocket server are written in Rust. The C++ renderer uses Cubism SDK and Vulkan, and the interface uses Dear ImGui. Run build and SDK preparation scripts in `scripts/` from the project root.
-
-```bash
-python3 tests/test_workspace.py -v
-python3 tests/test_render_size.py -v
-python3 tests/test_expression_management.py -v
-```

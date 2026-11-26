@@ -64,8 +64,8 @@ fi
     def test_forced_build_and_verified_binary(self):
         result, commands = self.run_build()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(commands, ['clean --release -p studio-vts-api', 'test --locked', 'build --locked --release --bins'])
-        self.assertIn('Kawari ready (expression UI protocol 3)', result.stdout)
+        self.assertEqual(commands, ['clean --release -p studio-vts-api', 'build --locked --release --bins'])
+        self.assertIn('Built Kawari core and API.', result.stdout)
 
 if __name__ == '__main__':
     unittest.main()

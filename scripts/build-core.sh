@@ -30,4 +30,4 @@ if [[ "$API_HELP" != *"$MARKER"* || "$API_HELP" != *"$PLUGIN_MARKER"* ]]; then
 fi
 ln -sfn studio "$ROOT/api-rust/target/release/kawari"
 ln -sfn studio-vts-api "$ROOT/api-rust/target/release/kawari-api"
-printf 'Kawari ready (expression UI protocol 3): %s/scripts/run-kawari.sh\n' "$ROOT"
+printf 'Built Kawari core and API.\n'

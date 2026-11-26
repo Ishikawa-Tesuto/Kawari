@@ -303,7 +303,18 @@ fn run()->R<i32>{
     unsafe{libc::signal(libc::SIGINT,stop as libc::sighandler_t);libc::signal(libc::SIGTERM,stop as libc::sighandler_t);}
     if a.prepare_only{prepare(&a)?;return Ok(0)}
     let mut lib=library::Library::load()?;for dir in &a.library_dirs{lib.add_root(dir)?;}
-    if a.model.as_os_str().is_empty(){a.model=lib.last.clone().ok_or_else(||err("No last model; specify an original .model3.json on first launch"))?;}
+    if a.model.as_os_str().is_empty() {
+        a.model = if let Some(last) = lib.last.as_ref().filter(|model| model.is_file()) {
+            last.clone()
+        } else {
+            let root = project_root(&env::current_exe()?)?;
+            let sample = root.join("build/sdk/Samples/Resources/Haru/Haru.model3.json");
+            if !sample.is_file() {
+                return Err(err("Haru is missing from the staged Cubism SDK. Run ./scripts/build.sh or pass an original .model3.json file."));
+            }
+            sample
+        };
+    }
     a.model=library::original(&a.model)?;let mut p=prepare(&a)?;
     loop{if stopped(){return Ok(0)}match run_session(&mut a,&mut p,&mut lib)?{SessionExit::End(code)=>return Ok(code),SessionExit::Switch(next,next_profile)=>{a=next;p=next_profile;}}}
 }

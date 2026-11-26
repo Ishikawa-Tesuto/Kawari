@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+WITH_BROADCAST=1
+CLEAN=0
+usage() { echo 'Usage: scripts/build.sh [--clean-native] [--with-broadcast | --without-broadcast]'; }
+for arg in "$@"; do
+  case "$arg" in
+    --clean-native) CLEAN=1 ;;
+    --with-broadcast) WITH_BROADCAST=1 ;;
+    --without-broadcast) WITH_BROADCAST=0 ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage >&2; exit 1 ;;
+  esac
+done
+
 SDK="${CUBISM_SDK_ROOT:-$ROOT/vendor/cubism-sdk}"
 SDK="$(realpath -e -- "$SDK")" || { echo 'Set CUBISM_SDK_ROOT to the unpacked Cubism 5 SDK for Native R5.' >&2; exit 1; }
-for tool in cargo cmake ninja python3 glslc git; do command -v "$tool" >/dev/null || { echo "Missing tool: $tool" >&2; exit 1; }; done
+tools=(cargo cmake ninja python3 glslc git)
+if [[ "$WITH_BROADCAST" == 1 ]]; then tools+=(meson pkg-config); fi
+for tool in "${tools[@]}"; do command -v "$tool" >/dev/null || { echo "Missing tool: $tool" >&2; exit 1; }; done
 for f in Core/lib/linux/x86_64/libLive2DCubismCore.a Core/include/Live2DCubismCore.h Samples/Vulkan/Demo/proj.linux.cmake/CMakeLists.txt Framework/CMakeLists.txt; do
   [[ -f "$SDK/$f" ]] || { echo "Incomplete SDK: $f" >&2; exit 1; }
 done
@@ -11,27 +26,43 @@ mkdir -p "$ROOT/build"
 rm -f -- "$ROOT/build/studio-build-id"
 SOURCE_ID="$(bash "$ROOT/scripts/source-id.sh")"
 STAGE="$ROOT/build/sdk"
-# Keep source SDK pristine. Recreate stage on SDK-path change or explicit reset.
-WITH_BROADCAST=0
-CLEAN=0
-for arg in "$@"; do
-  case "$arg" in --clean-native) CLEAN=1;; --with-broadcast) WITH_BROADCAST=1;; *) echo 'Usage: scripts/build.sh [--clean-native] [--with-broadcast]' >&2; exit 1;; esac
-done
-if [[ "$CLEAN" == 1 ]]; then rm -rf -- "$STAGE" "$ROOT/build/native"; fi
+# Recreate the local SDK and renderer build when requested.
+if [[ "$CLEAN" == 1 ]]; then
+  rm -rf -- "$STAGE" "$ROOT/build/native"
+  rm -f -- "$ROOT/build/sdk-origin"
+fi
+if [[ -f "$ROOT/build/sdk-origin" ]] && [[ "$(cat "$ROOT/build/sdk-origin")" != "$SDK" ]]; then
+  echo 'SDK source changed; use --clean-native.' >&2; exit 1
+fi
+
 FUNNEL_BUILD=""
 FUNNEL_INCLUDE=""
 if [[ "$WITH_BROADCAST" == 1 ]]; then
   FUNNEL_SRC="${FUNNEL_SOURCE:-$ROOT/vendor/libfunnel}"
-  [[ -f "$FUNNEL_SRC/meson.build" ]] || { echo 'Run scripts/probe-broadcast.sh --build first.' >&2; exit 1; }
+  FUNNEL_REV=4f049b39264afae316f5e04738957b462403bb49
+  if [[ ! -e "$FUNNEL_SRC" && ! -L "$FUNNEL_SRC" && -z "${FUNNEL_SOURCE:-}" ]]; then
+    mkdir -p "$ROOT/vendor"
+    funnel_checkout="$(mktemp -d "$ROOT/vendor/.libfunnel.XXXXXX")"
+    trap 'rm -rf -- "$funnel_checkout"' EXIT
+    git clone --no-checkout https://github.com/hoshinolina/libfunnel.git "$funnel_checkout"
+    git -C "$funnel_checkout" checkout --detach "$FUNNEL_REV"
+    git -C "$funnel_checkout" submodule update --init --recursive
+    mv -T -- "$funnel_checkout" "$FUNNEL_SRC"
+  fi
+  [[ -f "$FUNNEL_SRC/meson.build" ]] || { echo "Missing libfunnel checkout: $FUNNEL_SRC" >&2; exit 1; }
+  FUNNEL_SRC="$(realpath -e -- "$FUNNEL_SRC")"
   REV="$(git -C "$FUNNEL_SRC" rev-parse HEAD)"
-  [[ "$REV" == 4f049b39264afae316f5e04738957b462403bb49 ]] || { echo "Unsupported libfunnel revision: $REV (expected tested 4f049b39264afae316f5e04738957b462403bb49)" >&2; exit 1; }
-  "$ROOT/scripts/probe-broadcast.sh" --build
-  FUNNEL_BUILD="$ROOT/build/funnel-probe-a1"
-  FUNNEL_INCLUDE="$ROOT/build/funnel-source-a1/include"
+  [[ "$REV" == "$FUNNEL_REV" ]] || { echo "Unsupported libfunnel revision: $REV (expected $FUNNEL_REV)" >&2; exit 1; }
+  FUNNEL_BUILD="$ROOT/build/funnel"
+  FUNNEL_INCLUDE="$FUNNEL_SRC/include"
+  if [[ ! -f "$FUNNEL_BUILD/meson-private/coredata.dat" || ! -f "$FUNNEL_BUILD/.studio-source" ]] ||
+     [[ "$(cat "$FUNNEL_BUILD/.studio-source")" != "$FUNNEL_SRC" ]]; then
+    rm -rf -- "$FUNNEL_BUILD"
+    meson setup "$FUNNEL_BUILD" "$FUNNEL_SRC" --buildtype=release -Degl=false -Dvulkan=true -Dtest_apps=false
+    printf '%s\n' "$FUNNEL_SRC" > "$FUNNEL_BUILD/.studio-source"
+  fi
+  meson compile -C "$FUNNEL_BUILD"
   [[ -f "$FUNNEL_BUILD/libfunnel.so" && -f "$FUNNEL_BUILD/libfunnel-vk.so" && -f "$FUNNEL_INCLUDE/funnel-vk.h" ]] || { echo 'libfunnel build files not found' >&2; exit 1; }
-fi
-if [[ -f "$ROOT/build/sdk-origin" ]] && [[ "$(cat "$ROOT/build/sdk-origin")" != "$SDK" ]]; then
-  echo 'SDK source changed; use --clean-native.' >&2; exit 1
 fi
 # Keep GUI dependency outside staged SDK so updates do not re-download it.
 IMGUI_ROOT="$ROOT/vendor/imgui"
@@ -71,8 +102,13 @@ cmake -S "$STAGE/Samples/Vulkan/Demo/proj.linux.cmake" -B "$ROOT/build/native" -
   -DCMAKE_BUILD_TYPE=Release -DCSM_MINIMUM_DEMO=OFF -DGLFW_BUILD_WAYLAND=ON -DGLFW_BUILD_X11=ON
 cmake --build "$ROOT/build/native" --parallel "${JOBS:-4}"
 (cd "$ROOT" && cargo build --locked --release)
+"$ROOT/scripts/build-core.sh"
 [[ -x "$ROOT/build/native/bin/Demo/Demo" ]] || { echo 'Expected native viewer not found' >&2; exit 1; }
 [[ "$(bash "$ROOT/scripts/source-id.sh")" == "$SOURCE_ID" ]] || { echo 'Sources changed during build. Rebuild.' >&2; exit 1; }
 printf '%s\n' "$WITH_BROADCAST" > "$ROOT/build/studio-broadcast-enabled"
 printf '%s\n' "$SOURCE_ID" > "$ROOT/build/studio-build-id"
-printf '\nBuilt. Run: %s/scripts/run.sh --sample\n' "$ROOT"
+if [[ "$WITH_BROADCAST" == 1 ]]; then
+  printf '\nKawari is ready. Run ./scripts/run-kawari.sh from the project root.\n'
+else
+  printf '\nKawari is ready. Run ./scripts/run-kawari.sh --no-broadcast from the project root.\n'
+fi
