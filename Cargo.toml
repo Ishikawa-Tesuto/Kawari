@@ -1,0 +1,10 @@
+[package]
+name = "vtuber-studio"
+version = "0.3.0-alpha.1"
+edition = "2021"
+publish = false
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1

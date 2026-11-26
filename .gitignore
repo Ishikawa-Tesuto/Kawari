@@ -1,0 +1,5 @@
+/target/
+/build/
+/vendor/*
+!/vendor/.gitkeep
+__pycache__/
