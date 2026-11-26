@@ -1,5 +1,0 @@
-# input ID       Live2D ID       input min max  output min max  smoothing ms
-FaceAngleX        ParamAngleX     -1 1           -30 30          60
-FaceAngleY        ParamAngleY     -1 1           -30 30          60
-MouthOpen         ParamMouthOpenY  0 1            0 1            25
-# This example is suitable for Haru and TesutoXXI. Adjust limits for other rigs.
