@@ -5,6 +5,8 @@
 
 Kawari is a native Linux app for Live2D avatars and livestreaming. Load a Live2D model, configure tracking and expressions, add props to your scene, and send video with a transparent background to OBS over PipeWire.
 
+VTube Studio inspired me to start Kawari. Since it had no native Linux version, I set out to build a native app with the tools I wanted for my own streams. I hope it makes streaming on Linux a little easier for you, too.
+
 **P0.5h3 · Prototype · Linux x86-64**
 
 [Install](#install-on-arch-linux) · [Build](#build-on-arch-linux) · [Launch](#first-launch) · [OBS](#stream-to-obs) · [Integrations](#integrations)
@@ -15,7 +17,8 @@ Kawari is a native Linux app for Live2D avatars and livestreaming. Load a Live2D
 | --- | --- |
 | **Live2D models** | Open `.model3.json` models, switch between them from the model library, configure tracking and physics, and control animation playback. |
 | **Expressions and hotkeys** | Create expressions that change model parameters and item visibility. Set fade-in and fade-out durations, assign hotkeys, and make expressions mutually exclusive. |
-| **Scene items** | Import PNGs and GIFs, layer them in front of or behind the model, and adjust their size, rotation, and opacity. Attach items to the model root or to a specific ArtMesh so they follow the model or local motion. |
+| **Scene items** | Import PNGs and GIFs, layer them in front of or behind the model, and adjust their size, rotation, and opacity. |
+| **Item attachments** | Attach items to the model root or choose a Live2D ArtMesh by ID or directly in the preview. Items keep their placement when attached and can be repositioned. ArtMesh attachments follow the mesh’s movement, rotation, and scale and are saved per model. |
 | **Workspace** | Dock panels on the right or open them as floating windows. Docked panels overlay the preview while the model keeps its position and scale. |
 | **Video output** | Send video with an alpha channel over PipeWire using DMA-BUF. Set the stream resolution independently of the window size. |
 | **Integrations** | Connect VBridger and other clients through Kawari's partial implementation of the VTube Studio Public API. Bind Twitch Channel Points rewards to expressions. |
@@ -97,10 +100,6 @@ When streaming a game, enable **Settings → General → Pause unfocused preview
   Kawari renews your saved Twitch login while the integration is enabled. Twitch's Public app refresh tokens expire after 30 days without renewal, so a long break can require signing in again.
 - **OBS scene positions.** In **Expressions & Hotkeys**, open an expression and enable **Move model** in the **Position** tab. Enter X and Y or capture the current placement, enable **Change scale** if needed, then set the transition speed. Invoking the expression moves the model once to the selected position and scale. The model stays there after the expression ends. OBS scene bindings use the same movement. Enable OBS's WebSocket server under **Tools → WebSocket Server Settings**. Connect in **Integrations → OBS** using the server port (4455 by default) and password. Bind a program scene to a saved expression and set the delay in milliseconds from the start of the OBS transition to line up movement with a stinger. Bindings are saved per model and use the scene name. Switching to a scene without a binding keeps the current placement. [OBS remote control guide](https://obsproject.com/kb/remote-control-guide)
 - **Global hotkeys.** The local package includes the shortcut helper. For a source build, build it with `./scripts/build-global-shortcuts.sh`. On X11, enable **Global** for an assigned hotkey. On Wayland, global registration is experimental and disabled by default.
-
-## Attach items to an ArtMesh
-
-Select an image in **Items**. Under **Attachment**, choose an ArtMesh by ID or use **Pick ArtMesh in preview** and click the model. The item keeps its placement when attached and follows the mesh’s movement, rotation, and scale. Use **Placement** to adjust the offset, or drag the item in the preview. An ArtMesh binding is saved for its model and appears again when that model is loaded.
 
 ## Data and settings
 
