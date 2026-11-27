@@ -45,7 +45,7 @@ int main(){
         self.assertIn('ui_write_broadcast(d)',settings)
         self.assertIn('broadcast-save.tsv',settings)
         self.assertIn('apply_live_broadcast_settings',settings)
-        self.assertLess(settings.index('ImGui::EndTabBar()'),settings.index('ImGui::Button("Save")'))
+        self.assertLess(settings.index('ImGui::EndTabBar()'),settings.index('ui::primary_button("Save")'))
         integrations=s.split('void plugins_popup(',1)[1].split('void expressions_popup(',1)[0]
         for name in ('Plugins','Twitch'):
             self.assertIn(f'BeginTabItem(ui::tr("{name}###',integrations)
@@ -55,10 +55,11 @@ int main(){
         expressions=s.split('void expressions_popup(',1)[1].split('bool init(',1)[0]
         self.assertIn('BeginTabItem(ui::tr("Expressions###',expressions)
         self.assertIn('BeginTabItem(ui::tr("Hotkeys###',expressions)
-        self.assertIn('if(r.hotkey||!ui_parameter_matches(r.name,expression_filter))',expressions)
-        self.assertIn('if(!r.hotkey||!ui_parameter_matches(r.name,hotkey_filter))',expressions)
+        self.assertIn('expression_list(false,expression_filter,selected_expression)',expressions)
+        self.assertIn('expression_list(true,hotkey_filter,selected_hotkey)',expressions)
         self.assertLess(expressions.index('shortcut_events.clear();\n    if(!expression_open)return;'),expressions.index('BeginTabBar'))
+        controls=s.split('const ExpressionRow* expression_list(',1)[1].split('bool init(',1)[0]
         for action in ('bind','toggle','trigger','global','import-vts'):
-            self.assertIn(f'expression_request("{action}"',expressions)
+            self.assertIn(f'expression_request("{action}"',controls)
 
 if __name__=='__main__': unittest.main()

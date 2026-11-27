@@ -7,6 +7,7 @@
 #include "studio_physics.hpp"
 #include "studio_animations.hpp"
 #include "studio_items.hpp"
+#include "studio_items_vk.hpp"
 #include "studio_render_size.hpp"
 #include "imgui.h"
 #include "studio_ui_theme.hpp"
@@ -114,10 +115,10 @@ void library_popup(const ImVec2& sz) {
     ui::place_tool(sz,float(ui_bar_height(int(sz.y))),650.f,440.f,true);
     if(!ImGui::BeginPopupModal(ui::tr("Model Library###model_library","Библиотека моделей###model_library"),&library_open,ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoSavedSettings))return;
     const auto& current=active_original_model();
-    ImGui::TextUnformatted("Library");ImGui::SameLine();ImGui::TextDisabled("%zu models",library_models.size());
+    ImGui::TextDisabled("%zu models",library_models.size());
     ImGui::BeginDisabled(switch_pending);
-    if(ImGui::SmallButton("Refresh"))read_library(dir);
-    ImGui::SameLine();ImGui::Checkbox("Show paths",&library_show_paths);
+    if(ImGui::Button("Refresh"))read_library(dir);
+    ui::next_action("Show paths");ImGui::Checkbox("Show paths",&library_show_paths);
     ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##library_filter","Search model name or path",library_filter,sizeof(library_filter));
     const bool dirty=editor_dirty()||parameter_draft_pending()||physics_dirty()||animation_dirty();
     ImGui::BeginChild("##models",ImVec2(0,std::max(45.f,ImGui::GetContentRegionAvail().y-(dirty?155.f:125.f)*ui::scale())),ImGuiChildFlags_Borders);
@@ -129,9 +130,8 @@ void library_popup(const ImVec2& sz) {
         ++matches;
         ImGui::PushID(path.c_str());
         // A stable ID is independent of the model name or the loaded badge.
-        if(ImGui::Selectable((name+(active?"  [Active]":"")+"###model").c_str(),path==model_path,ImGuiSelectableFlags_NoAutoClosePopups,ImVec2(0,32)) && path.size()<sizeof(model_path))
+        if(ui::choice_row(name.c_str(),active?"Loaded":"",path==model_path,path.c_str()) && path.size()<sizeof(model_path))
             std::snprintf(model_path,sizeof(model_path),"%s",path.c_str());
-        if(ImGui::IsItemHovered()){ImGui::BeginTooltip();ImGui::TextUnformatted(path.c_str());ImGui::EndTooltip();}
         if(library_show_paths)ImGui::TextWrapped("%s",path.c_str());
         ImGui::PopID();
     }
@@ -142,9 +142,9 @@ void library_popup(const ImVec2& sz) {
     if(!hot_switch_enabled())ImGui::TextWrapped("Loading restarts the renderer and API.");
     if(dirty)ImGui::Checkbox("Discard unsaved model settings",&discard_on_switch);
     ImGui::BeginDisabled(!model_path[0]||current==model_path);
-    if(ImGui::Button("Load model"))switch_pending=request_model(dir,model_path);
+    if(ui::primary_button("Load model"))switch_pending=request_model(dir,model_path);
     ImGui::EndDisabled();
-    ImGui::EndDisabled(); ImGui::SameLine();
+    ImGui::EndDisabled(); ui::next_action("Close");
     if(ImGui::Button("Close") || (ImGui::IsKeyPressed(ImGuiKey_Escape,false)&&!ImGui::IsAnyItemActive()&&!ImGui::GetIO().WantTextInput)){library_open=false;ImGui::CloseCurrentPopup();}
     if(switch_pending) ImGui::TextDisabled("Preparing model...");
     else if(!library_error.empty()) ImGui::TextWrapped("%s",library_error.c_str());
@@ -210,8 +210,8 @@ void parameter_popup(const ImVec2& sz){
     if(parameter_selected>=int(defs.size())||(parameter_selected<0&&!defs.empty()))select_parameter(defs.empty()?-1:0);
     refresh_input_catalog();
     if(ui::tool_button("Mappings",!show_inputs))show_inputs=false;
-    ImGui::SameLine();if(ui::tool_button("Tracking inputs",show_inputs))show_inputs=true;
-    ImGui::SameLine();ImGui::TextDisabled("%zu outputs / %zu inputs",defs.size(),input_catalog.size());
+    ui::next_action("Tracking inputs");if(ui::tool_button("Tracking inputs",show_inputs))show_inputs=true;
+
     ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##filter",show_inputs?"Search input or plugin":"Search input / output",show_inputs?catalog_filter:parameter_filter,sizeof(parameter_filter));
     if(show_inputs){
         if(preview_active)stop_preview();
@@ -220,18 +220,20 @@ void parameter_popup(const ImVec2& sz){
         if(!input_catalog_ready)ImGui::TextDisabled("Waiting for API input catalog...");
         for(const auto& p:input_catalog){
             if(!input_kind_matches(p)||(!ui_parameter_matches(p.name,catalog_filter)&&!ui_parameter_matches(p.owner,catalog_filter)))continue;
-            ImGui::PushID(p.name.c_str());ImGui::TextUnformatted(p.name.c_str());
-            ImGui::SameLine();ImGui::TextDisabled("%s%s",p.kind=="mapping"?"Model mapping":p.owner.c_str(),p.routed?" / mapped":" / unmapped");
+            ImGui::PushID(p.name.c_str());ImGui::TextWrapped("%s",p.name.c_str());
+            ImGui::TextWrapped("%s%s",p.kind=="mapping"?"Model mapping":p.owner.c_str(),p.routed?" / mapped":" / unmapped");
             if(p.live)ImGui::Text("%.4f",p.value);else ImGui::TextDisabled("No live sample");
             range_meter(p.minimum,p.maximum,p.value,p.live);
             ImGui::TextDisabled("%.3f .. %.3f (default %.3f)",p.minimum,p.maximum,p.initial);
             ImGui::Separator();ImGui::PopID();
         }
-        ImGui::EndChild();if(ImGui::Button("Back to mappings"))show_inputs=false;ImGui::SameLine();if(ImGui::Button("Close")){stop_preview();parameter_open=false;parameter_focus=false;}ImGui::End();return;
+        ImGui::EndChild();if(ImGui::Button("Back to mappings"))show_inputs=false;ui::next_action("Close");if(ImGui::Button("Close")){stop_preview();parameter_open=false;parameter_focus=false;}ImGui::End();return;
     }
     const float height=std::max(40.f,ImGui::GetContentRegionAvail().y-112.f*ui::scale());
-    const float left=std::max(70.f,ImGui::GetContentRegionAvail().x*.34f);
-    ImGui::BeginChild("##parameter_list",ImVec2(left,height),ImGuiChildFlags_Borders);
+    const bool wide=ImGui::GetContentRegionAvail().x>=520.f*ui::scale();
+    const float list_height=wide?height:std::max(86.f*ui::scale(),height*.36f);
+    const float list_width=wide?ImGui::GetContentRegionAvail().x*.34f:0.f;
+    ImGui::BeginChild("##parameter_list",ImVec2(list_width,list_height),ImGuiChildFlags_Borders);
     ImGui::BeginDisabled(draft_changed);
     for(size_t i=0;i<defs.size();++i){
         const auto& d=defs[i];
@@ -239,18 +241,22 @@ void parameter_popup(const ImVec2& sz){
         for(const auto& m:rt.mappings())if(m.target==i){mapping=&m;break;}
         if(!ui_parameter_matches(d.id,parameter_filter)&&(!mapping||!ui_parameter_matches(mapping->input,parameter_filter)))continue;
         ImGui::PushID(int(i));
-        if(ImGui::Selectable((d.id+"##param").c_str(),parameter_selected==int(i),ImGuiSelectableFlags_NoAutoClosePopups))select_parameter(int(i));
-        if(mapping)ImGui::TextDisabled("IN: %s",mapping->input.c_str());
-        if(i<values.size())ImGui::TextDisabled("OUT: %.3f%s",values[i],d.repeat?"  Repeat":"");
+        if(ui::choice_row(d.id.c_str(),wide?"":mapping?mapping->input.c_str():"",parameter_selected==int(i)))select_parameter(int(i));
         ImGui::PopID();
     }
-    ImGui::EndDisabled();ImGui::EndChild();ImGui::SameLine();
-    ImGui::BeginChild("##parameter_details",ImVec2(0,height),ImGuiChildFlags_Borders);
+    ImGui::EndDisabled();ImGui::EndChild();
+    if(wide)ImGui::SameLine();
+    const float details_height=wide?height:std::max(105.f*ui::scale(),height-list_height-ImGui::GetStyle().ItemSpacing.y);
+    ImGui::BeginChild("##parameter_details",ImVec2(0,details_height),ImGuiChildFlags_Borders);
     if(parameter_selected>=0&&size_t(parameter_selected)<defs.size()){
         const auto& d=defs[parameter_selected];
         const float actual=size_t(parameter_selected)<values.size()?values[parameter_selected]:d.initial;
-        auto edit_float=[&](const char* label,float& v){ImGui::SetNextItemWidth(std::max(60.f,ImGui::GetContentRegionAvail().x*.55f));if(ImGui::InputFloat(label,&v,0,0,"%.4f")){draft_changed=true;parameter_status.clear();}};
-        ImGui::TextUnformatted("INPUT");
+        auto edit_float=[&](const char* label,float& v){
+            ImGui::PushID(label);ui::field_label(label);
+            if(ImGui::InputFloat("##value",&v,0,0,"%.4f")){draft_changed=true;parameter_status.clear();}
+            ImGui::PopID();
+        };
+        ImGui::SeparatorText("Tracking input");
         ImGui::SetNextItemWidth(-1);
         if(ImGui::BeginCombo("##known_inputs",draft.input.empty()?"Select tracking input":draft.input.c_str())){
             ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##input_filter","Search input / plugin",input_filter,sizeof(input_filter));
@@ -290,14 +296,14 @@ void parameter_popup(const ImVec2& sz){
         edit_float("IN start",draft.in_min);edit_float("IN end",draft.in_max);
         if(ImGui::Checkbox("Limit input range",&draft.clamp_input))draft_changed=true;
         ImGui::Separator();
-        ImGui::TextUnformatted("OUTPUT");ImGui::SameLine();ImGui::TextDisabled("%s%s",d.id.c_str(),d.repeat?" / Repeat":"");
+        ImGui::SeparatorText("Model parameter");ImGui::TextWrapped("%s%s",d.id.c_str(),d.repeat?" / Repeat":"");
         ImGui::Text("Current: %.4f",actual);
         range_meter(draft.out_min,draft.out_max,actual,true);
         ImGui::TextDisabled("Model range: %.3f .. %.3f",d.minimum,d.maximum);
         edit_float("OUT start",draft.out_min);edit_float("OUT end",draft.out_max);
         if(ImGui::Checkbox("Limit output range",&draft.clamp_output))draft_changed=true;
         if(ImGui::Button("Invert output")){std::swap(draft.out_min,draft.out_max);draft_changed=true;}
-        ImGui::SameLine();if(ImGui::Button("Use model range")){draft.out_min=d.minimum;draft.out_max=d.maximum;draft_changed=true;}
+        ui::next_action("Use model range");if(ImGui::Button("Use model range")){draft.out_min=d.minimum;draft.out_max=d.maximum;draft_changed=true;}
         ImGui::Separator();
         edit_float("Smoothing (ms)",draft.smoothing_ms);
         if(ImGui::Button("Identity")){
@@ -312,7 +318,7 @@ void parameter_popup(const ImVec2& sz){
                 editor_preview(size_t(parameter_selected),preview_value);preview_active=true;
             }
             if(ImGui::Button("Test default")){preview_value=d.initial;editor_preview(size_t(parameter_selected),preview_value);preview_active=true;}
-            ImGui::SameLine();if(ImGui::Button("Release test"))stop_preview();
+            ui::next_action("Release test");if(ImGui::Button("Release test"))stop_preview();
             ImGui::EndDisabled();ImGui::TreePop();
         }else if(preview_active)stop_preview();
         if(std::isfinite(draft.in_min)&&std::isfinite(draft.in_max)&&draft.in_min!=draft.in_max&&std::isfinite(draft.in_max-draft.in_min)&&std::isfinite(draft.out_min)&&std::isfinite(draft.out_max)){
@@ -327,11 +333,11 @@ void parameter_popup(const ImVec2& sz){
         std::string error;if(editor_apply_mapping(draft,error)){draft_changed=false;stop_preview();parameter_status="Applied. Save to keep after restart.";}
         else parameter_status=error;
     }
-    ImGui::SameLine();if(ImGui::Button("Discard draft"))select_parameter(parameter_selected);
-    ImGui::EndDisabled();ImGui::SameLine();
+    ui::next_action("Discard draft");if(ImGui::Button("Discard draft"))select_parameter(parameter_selected);
+    ImGui::EndDisabled();ui::next_action("Save profile");
     ImGui::BeginDisabled(draft_changed||!editor_dirty()||!editor_can_save());
-    if(ImGui::Button("Save profile")){std::string error;parameter_status=editor_save(error)?"Saved to profile.":error;}
-    ImGui::EndDisabled();ImGui::SameLine();
+    if(ui::primary_button("Save profile")){std::string error;parameter_status=editor_save(error)?"Saved to profile.":error;}
+    ImGui::EndDisabled();ui::next_action("Close");
     if(ImGui::Button("Close")){stop_preview();parameter_open=false;parameter_focus=false;}
     if(draft_changed)ImGui::TextDisabled("Unapplied draft: apply or discard before switching models.");
     else if(!editor_can_save())ImGui::TextDisabled("Session only: no writable profile map.");
@@ -372,11 +378,12 @@ struct ExpressionDetail {float fade=.5f,fade_out=.5f;std::vector<ExpressionTerm>
 std::map<std::string,ExpressionDetail> expression_details;
 struct ExpressionDraft {bool open=false,preview=false,saving=false,selected_only=false;int tab=0;std::string key="new";char name[513]{},search[129]{};ExpressionDetail detail;std::chrono::steady_clock::time_point test_until{};};
 ExpressionDraft expression_draft;
+std::string selected_expression,selected_hotkey;
 struct ExpressionManagementUi {std::string key,delete_hotkey;char group[161]{},hotkey[161]{};bool protected_expression=false,confirm_delete=false;};
 ExpressionManagementUi expression_management_ui;
 
 void expression_editor_close(){expression_preview_clear();expression_draft=ExpressionDraft{};}
-void expression_reset(){expression_editor_close();expression_management_ui=ExpressionManagementUi{};expression_details.clear();expression_filter[0]=hotkey_filter[0]=0;expression_rows.clear();recording_key.clear();shortcut_events.clear();expression_dir.clear();expression_status.clear();global_status.clear();global_local_fallback=false;expression_wait=false;expression_open=false;expression_poll={};}
+void expression_reset(){expression_editor_close();expression_management_ui=ExpressionManagementUi{};selected_expression.clear();selected_hotkey.clear();expression_details.clear();expression_filter[0]=hotkey_filter[0]=0;expression_rows.clear();recording_key.clear();shortcut_events.clear();expression_dir.clear();expression_status.clear();global_status.clear();global_local_fallback=false;expression_wait=false;expression_open=false;expression_poll={};}
 bool expression_send(const std::string& text){
     if(expression_dir.empty()||expression_wait||text.size()>16383)return false;
     auto base=expression_dir+"/expression-request";
@@ -391,11 +398,20 @@ bool expression_request(const char* action,const std::string& key,unsigned chord
     if(std::string(action)=="bind"||std::string(action)=="global")text+="\t"+std::to_string(chord);
     return expression_send(text);
 }
+std::string expression_display_name(const std::string& file){
+    const std::string suffix=".exp3.json";
+    if(file.size()<=suffix.size()||file.compare(file.size()-suffix.size(),suffix.size(),suffix)!=0)return file;
+    return file.substr(0,file.size()-suffix.size());
+}
 void expression_editor_begin(const ExpressionRow* row,bool duplicate=false){
-    expression_editor_close();auto& d=expression_draft;d.open=true;d.key=row&&!duplicate?row->key:"new";
-    if(row){d.detail=expression_details.at(row->key);std::string n=row->name;
-        const std::string suffix=".exp3.json";if(n.size()>=suffix.size()&&n.compare(n.size()-suffix.size(),suffix.size(),suffix)==0)n.resize(n.size()-suffix.size());
-        if(duplicate)n+=" Copy";std::snprintf(d.name,sizeof(d.name),"%s",n.c_str());}
+    expression_editor_close();auto& draft=expression_draft;
+    draft.open=true;draft.key=row&&!duplicate?row->key:"new";
+    if(row){
+        draft.detail=expression_details.at(row->key);
+        auto name=expression_display_name(row->name);
+        if(duplicate)name+=" Copy";
+        std::snprintf(draft.name,sizeof(draft.name),"%s",name.c_str());
+    }
     expression_status.clear();recording_key.clear();shortcut_events.clear();
 }
 void expression_editor_draw(){
@@ -406,15 +422,21 @@ void expression_editor_draw(){
     if(d.test_until!=std::chrono::steady_clock::time_point{}&&now>=d.test_until){expression_preview_clear();d.test_until={};}
     bool testing=d.test_until!=std::chrono::steady_clock::time_point{};
     ImGui::BeginDisabled(testing);
-    ImGui::TextUnformatted("Fade in (seconds)");ImGui::SetNextItemWidth(-1);
-    if(ImGui::InputFloat("##fade_in",&d.detail.fade,.1f,1.f,"%.2f"))d.detail.fade=std::isfinite(d.detail.fade)?std::max(0.f,std::min(10.f,d.detail.fade)):.5f;
-    ImGui::TextUnformatted("Fade out (seconds)");ImGui::SetNextItemWidth(-1);
-    if(ImGui::InputFloat("##fade_out",&d.detail.fade_out,.1f,1.f,"%.2f"))d.detail.fade_out=std::isfinite(d.detail.fade_out)?std::max(0.f,std::min(10.f,d.detail.fade_out)):.5f;
-    ImGui::Checkbox("Live preview",&d.preview);ImGui::EndDisabled();ImGui::SameLine();ImGui::Checkbox("Selected only",&d.selected_only);
-    if(ImGui::RadioButton("Parameters",d.tab==0)){d.tab=0;d.search[0]=0;}ImGui::SameLine();if(ImGui::RadioButton("Items",d.tab==1)){d.tab=1;d.search[0]=0;}
-    ImGui::SameLine();if(ImGui::RadioButton("Position",d.tab==2))d.tab=2;
+    if(ImGui::TreeNode("Fade timings")){
+        ui::field_label("Fade in (seconds)");
+        if(ImGui::InputFloat("##fade_in",&d.detail.fade,.1f,1.f,"%.2f"))d.detail.fade=std::isfinite(d.detail.fade)?std::max(0.f,std::min(10.f,d.detail.fade)):.5f;
+        ui::field_label("Fade out (seconds)");
+        if(ImGui::InputFloat("##fade_out",&d.detail.fade_out,.1f,1.f,"%.2f"))d.detail.fade_out=std::isfinite(d.detail.fade_out)?std::max(0.f,std::min(10.f,d.detail.fade_out)):.5f;
+        ImGui::TreePop();
+    }
+    ImGui::Checkbox("Live preview",&d.preview);ImGui::EndDisabled();
+    ImGui::Separator();
+    if(ui::tool_button("Parameters",d.tab==0)){d.tab=0;d.search[0]=0;}
+    ui::next_action("Items");if(ui::tool_button("Items",d.tab==1)){d.tab=1;d.search[0]=0;}
+    ui::next_action("Position");if(ui::tool_button("Position",d.tab==2))d.tab=2;
     if(d.tab!=2){
         ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##expression_parameter_search",d.tab==0?"Search parameters":"Search items",d.search,sizeof(d.search));
+        ImGui::Checkbox("Selected only",&d.selected_only);
     }
     const auto& defs=editor_runtime().definitions();
     auto valid_draft=[&](){
@@ -452,7 +474,7 @@ void expression_editor_draw(){
       }
       // Preserve imported terms missing from a revised rig until explicitly removed.
       for(auto it=d.detail.terms.begin();it!=d.detail.terms.end();){if(std::none_of(defs.begin(),defs.end(),[&](const parameters::Definition& def){return def.id==it->id;})){
-          ImGui::PushID(it->id.c_str());ImGui::TextWrapped("Missing: %s",it->id.c_str());if(ImGui::SmallButton("Remove")){it=d.detail.terms.erase(it);ImGui::PopID();continue;}ImGui::PopID();}++it;}
+          ImGui::PushID(it->id.c_str());ImGui::TextWrapped("Missing: %s",it->id.c_str());if(ImGui::Button("Remove")){it=d.detail.terms.erase(it);ImGui::PopID();continue;}ImGui::PopID();}++it;}
       }else if(d.tab==1){
         const auto& scene=items::scene();
         if(scene.rows.empty())ImGui::TextDisabled("Import PNG/GIF in Items first.");
@@ -474,7 +496,7 @@ void expression_editor_draw(){
         // A removed asset never silently binds to a different item with the same filename.
         for(auto it=d.detail.items.begin();it!=d.detail.items.end();){
             if(std::none_of(scene.rows.begin(),scene.rows.end(),[&](const items::Item& item){return items::asset_id(item)==it->id;})){
-                ImGui::PushID(it->id.c_str());ImGui::TextWrapped("Missing item: %s",it->id.c_str());if(ImGui::SmallButton("Remove action")){it=d.detail.items.erase(it);ImGui::PopID();continue;}ImGui::PopID();
+                ImGui::PushID(it->id.c_str());ImGui::TextWrapped("Missing item: %s",it->id.c_str());if(ImGui::Button("Remove action")){it=d.detail.items.erase(it);ImGui::PopID();continue;}ImGui::PopID();
             }++it;
         }
       }else{
@@ -488,13 +510,18 @@ void expression_editor_draw(){
         }
         if(auto& p=d.detail.position){
             constexpr float bound=parameters::pan_limit;
-            ImGui::DragFloat("X (right)",&p.x,.01f,-bound,bound,"%.3f",ImGuiSliderFlags_AlwaysClamp);
-            ImGui::DragFloat("Y (up)",&p.y,.01f,-bound,bound,"%.3f",ImGuiSliderFlags_AlwaysClamp);
+            ui::field_label("X (right)");
+            ImGui::DragFloat("##position_x",&p.x,.01f,-bound,bound,"%.3f",ImGuiSliderFlags_AlwaysClamp);
+            ui::field_label("Y (up)");
+            ImGui::DragFloat("##position_y",&p.y,.01f,-bound,bound,"%.3f",ImGuiSliderFlags_AlwaysClamp);
             bool change_scale=p.scale>0.f;
             if(ImGui::Checkbox("Change scale",&change_scale))p.scale=change_scale?camera_scale():0.f;
-            if(change_scale)
-                ImGui::DragFloat("Scale",&p.scale,.01f,parameters::min_scale,parameters::max_scale,"%.2fx",ImGuiSliderFlags_AlwaysClamp);
-            ImGui::DragFloat("Transition speed",&p.speed,.01f,.05f,20.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+            if(change_scale){
+                ui::field_label("Scale");
+                ImGui::DragFloat("##position_scale",&p.scale,.01f,parameters::min_scale,parameters::max_scale,"%.2fx",ImGuiSliderFlags_AlwaysClamp);
+            }
+            ui::field_label("Transition speed");
+            ImGui::DragFloat("##position_speed",&p.speed,.01f,.05f,20.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
             if(ImGui::Button("Use current placement")){
                 camera_offset(p.x,p.y);
                 if(change_scale)p.scale=camera_scale();
@@ -528,7 +555,7 @@ void expression_editor_draw(){
     if(!testing){if(d.preview&&valid&&!d.saving){if(!expression_preview("expr on editor-preview 0 500"+terms.str()))expression_preview_clear();}else expression_preview_clear();}
     ImGui::TextDisabled("%zu parameters | %zu items",d.detail.terms.size(),d.detail.items.size());
     ImGui::BeginDisabled(!valid||!d.name[0]||d.saving||testing);
-    if(ImGui::Button("Save expression")){
+    if(ui::primary_button("Save expression")){
       std::ostringstream req;req.imbue(std::locale::classic());req<<std::setprecision(9)<<"save-expression\t"<<d.key<<'\t'<<(d.key=="new"?d.name:"")<<'\t'<<d.detail.fade<<'\t'<<d.detail.fade_out;
       for(const auto& t:d.detail.terms)req<<'\t'<<t.id<<'\t'<<t.blend<<'\t'<<t.value;
       for(const auto& t:d.detail.items)req<<'\t'<<t.id<<"\tI\t"<<(t.show?1:0);
@@ -537,7 +564,7 @@ void expression_editor_draw(){
         if(p.scale>0.f)req<<' '<<p.scale;
       }
       if(expression_send(req.str())){d.saving=true;expression_preview_clear();}else expression_status="Could not send expression request";
-    }ImGui::EndDisabled();ImGui::SameLine();if(ImGui::Button("Cancel"))expression_editor_close();
+    }ImGui::EndDisabled();ui::next_action("Cancel");if(ImGui::Button("Cancel"))expression_editor_close();
 }
 bool broadcast_open=false,broadcast_focus=false,broadcast_ready=false,broadcast_pending=false;
 UiBroadcast broadcast_active,broadcast_saved,broadcast_draft;
@@ -563,17 +590,22 @@ void broadcast_popup(const ImVec2& sz){
     broadcast_focus=ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     if(!broadcast_ready){ImGui::TextWrapped("Broadcast preferences unavailable. Rebuild Application Core.");ImGui::End();return;}
     auto& d=broadcast_draft;
-    auto combo=[](const char* label,int& v,const int* vals,const char* const* labels,int n){int index=0;for(int i=0;i<n;++i)if(vals[i]==v)index=i; if(ImGui::Combo(label,&index,labels,n))v=vals[index];};
+    auto combo=[](const char* label,int& v,const int* vals,const char* const* labels,int n){
+        int index=0;for(int i=0;i<n;++i)if(vals[i]==v)index=i;
+        ImGui::PushID(label);ui::field_label(label);
+        if(ImGui::Combo("##value",&index,labels,n))v=vals[index];
+        ImGui::PopID();
+    };
     ImGui::Text("Active output: %d x %d @ %d FPS",broadcast_active.width,broadcast_active.height,broadcast_active.bfps);
     ImGui::TextDisabled("Requested mask: %d | SSAA: %dx",broadcast_active.mask,broadcast_active.ssaa);
     ImGui::Separator();ImGui::BeginDisabled(broadcast_pending);
     ImGui::BeginChild("##settings_content",ImVec2(0,std::max(40.f,ImGui::GetContentRegionAvail().y-108.f*ui::scale())),ImGuiChildFlags_None);
-    if(ImGui::BeginTabBar("##settings_tabs")){
+    if(ImGui::BeginTabBar("##settings_tabs",ImGuiTabBarFlags_FittingPolicyScroll)){
     if(ImGui::BeginTabItem(ui::tr("Rendering###rendering","Рендеринг###rendering"))){
     ImGui::TextDisabled("Apply on save");
     const int render_rates[]={0,30,60,120,144};const char* render_labels[]={"Unlimited","30","60","120","144"};
     combo("Render FPS limit",d.fps,render_rates,render_labels,5);
-    ImGui::Checkbox("Performance statistics in terminal",&d.stats);
+    ImGui::Checkbox("Statistics in terminal",&d.stats);
     ImGui::Separator();ImGui::TextDisabled("Apply on next launch");
     const int masks[]={256,512,1024,2048};const char* mask_labels[]={"256","512","1024","2048"};
     combo("Clipping mask size",d.mask,masks,mask_labels,4);
@@ -585,17 +617,20 @@ void broadcast_popup(const ImVec2& sz){
     const int widths[]={1280,1920,2560,3840,1080,720};const int heights[]={720,1080,1440,2160,1920,1280};
     const char* presets[]={"1280 x 720","1920 x 1080","2560 x 1440","3840 x 2160","1080 x 1920","720 x 1280","Custom"};
     int preset=6;for(int i=0;i<6;++i)if(d.width==widths[i]&&d.height==heights[i])preset=i;
-    if(ImGui::Combo("Resolution preset",&preset,presets,7)&&preset<6){d.width=widths[preset];d.height=heights[preset];}
-    ImGui::InputInt("Output width",&d.width,0);ImGui::InputInt("Output height",&d.height,0);
+    ui::field_label("Resolution preset");
+    if(ImGui::Combo("##resolution",&preset,presets,7)&&preset<6){d.width=widths[preset];d.height=heights[preset];}
+    ui::field_label("Output width");ImGui::InputInt("##output_width",&d.width,0);
+    ui::field_label("Output height");ImGui::InputInt("##output_height",&d.height,0);
     const int output_rates[]={30,60,120,144};const char* output_labels[]={"30","60","120","144"};
     combo("Output FPS target",d.bfps,output_rates,output_labels,4);
     ImGui::EndTabItem();}
     if(ImGui::BeginTabItem(ui::tr("General###general","Общие###general"))){
     auto& appearance=ui::preferences();
     const int scales[]={85,100,115,130,150};const char* scale_labels[]={"85%","100%","115%","130%","150%"};
-    combo(ui::tr("UI scale###ui_scale","Масштаб UI###ui_scale"),appearance.scale,scales,scale_labels,5);
+    combo(ui::tr("UI scale","Масштаб UI"),appearance.scale,scales,scale_labels,5);
     int language=appearance.russian?1:0;const char* languages[]={"English","Русский"};
-    if(ImGui::Combo(ui::tr("Navigation language###ui_language","Язык навигации###ui_language"),&language,languages,2))appearance.russian=language==1;
+    ui::field_label(ui::tr("Navigation language","Язык навигации"));
+    if(ImGui::Combo("##ui_language",&language,languages,2))appearance.russian=language==1;
     ImGui::TextWrapped("%s",ui::tr("Navigation and tab titles only; changes save automatically.","Только навигация и заголовки вкладок; сохраняется автоматически."));
     ImGui::Separator();
     ImGui::Checkbox("Start without preview",&d.no_preview);
@@ -605,22 +640,22 @@ void broadcast_popup(const ImVec2& sz){
     ImGui::EndChild();
     if(d.fps!=0&&d.fps<d.bfps)ImGui::TextWrapped("Render limit is below output FPS; output cannot reach its target.");
     if(!d.valid())ImGui::TextWrapped("Resolution must be 320-7680 per dimension; 2x SSAA requires both dimensions <=3840.");
-    if(d.restart_diff(broadcast_active))ImGui::TextDisabled("Output/quality changes require a restart.");
+    if(d.restart_diff(broadcast_active))ImGui::TextWrapped("Restart to apply output or quality changes.");
     ImGui::Separator();
     ImGui::BeginDisabled(!d.valid()||switch_pending);
-    if(ImGui::Button("Save")){
+    if(ui::primary_button("Save")){
         const auto tmp=dir+"/broadcast-save.tmp",dest=dir+"/broadcast-save.tsv";
         std::remove((dir+"/broadcast-result.txt").c_str());
         std::ofstream f(tmp,std::ios::trunc);f<<ui_write_broadcast(d);f.close();
         if(f&&std::rename(tmp.c_str(),dest.c_str())==0){broadcast_pending=true;broadcast_message="Saving...";}
         else{std::remove(tmp.c_str());broadcast_message="Cannot submit preferences.";}
     }
-    ImGui::EndDisabled();ImGui::SameLine();if(ImGui::Button("Revert")){d=broadcast_saved;broadcast_message.clear();}
-    ImGui::SameLine();if(ImGui::Button("Defaults")){d=UiBroadcast{};broadcast_message.clear();}
+    ImGui::EndDisabled();ui::next_action("Revert");if(ImGui::Button("Revert")){d=broadcast_saved;broadcast_message.clear();}
+    ui::next_action("Defaults");if(ImGui::Button("Defaults")){d=UiBroadcast{};broadcast_message.clear();}
     ImGui::EndDisabled();
     if(!broadcast_message.empty())ImGui::TextWrapped("%s",broadcast_message.c_str());
     if(!(d==broadcast_saved))ImGui::TextDisabled("Unsaved changes");
-    ImGui::TextDisabled("Launch arguments override saved preferences.");
+    ImGui::TextWrapped("Launch arguments override saved preferences.");
     ImGui::End();
 }
 void physics_popup(const ImVec2& sz){
@@ -635,40 +670,40 @@ void physics_popup(const ImVec2& sz){
     }
     auto& config=editor->current;
     ImGui::Checkbox("Use physics",&config.enabled);
-    ImGui::TextUnformatted("Physics strength");ImGui::SameLine();
-    if(ImGui::SmallButton(physics_groups_open?"Hide groups":"Groups..."))physics_groups_open=!physics_groups_open;
-    float strength_percent=config.strength*100.f;ImGui::SetNextItemWidth(-1);
+    float strength_percent=config.strength*100.f;ui::field_label("Physics strength");
     if(ImGui::SliderFloat("##strength",&strength_percent,0.f,200.f,"%.0f%%",ImGuiSliderFlags_AlwaysClamp))config.strength=strength_percent/100.f;
     if(ImGui::IsItemHovered())ImGui::SetTooltip("Relative to the loaded model's imported physics scales.");
     const int fps_values[]={0,30,60,120};const char* fps_labels[]={"Model default","30 Hz","60 Hz","120 Hz"};
     int fps_index=config.fps==30?1:config.fps==60?2:config.fps==120?3:0;
-    if(ImGui::Combo("Physics rate",&fps_index,fps_labels,4))config.fps=fps_values[fps_index];
+    ui::field_label("Physics rate");
+    if(ImGui::Combo("##physics_rate",&fps_index,fps_labels,4))config.fps=fps_values[fps_index];
     if(editor->original_fps>0)ImGui::TextDisabled("Exported rate: %.2f Hz",editor->original_fps);
     else ImGui::TextDisabled("Exported rate: variable");
     ImGui::Separator();
+    if(ImGui::Button(physics_groups_open?"Hide group controls":"Adjust physics groups"))physics_groups_open=!physics_groups_open;
     if(physics_groups_open){
-    ImGui::Text("Physics group strength (%zu)",config.groups.size());
-    ImGui::SameLine();ImGui::Checkbox("Adjusted only",&physics_adjusted_only);
+    ImGui::Checkbox("Adjusted only",&physics_adjusted_only);
     ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##physics_filter","Search group",physics_filter,sizeof(physics_filter));
     ImGui::BeginChild("##physics_groups",ImVec2(0,std::max(50.f,ImGui::GetContentRegionAvail().y-68.f*ui::scale())),ImGuiChildFlags_Borders);
     for(size_t i=0;i<config.groups.size();++i){
         auto& group=config.groups[i];if(!ui_parameter_matches(group.name,physics_filter)&&!ui_parameter_matches(group.id,physics_filter))continue;
         if(physics_adjusted_only&&group.factor==1.f)continue;
-        ImGui::PushID(int(i));ImGui::TextUnformatted(group.name.c_str());
+        ImGui::PushID(int(i));ImGui::TextWrapped("%s",group.name.c_str());
         if(group.name!=group.id)ImGui::TextDisabled("%s",group.id.c_str());
         ImGui::BeginDisabled(!editor->has_angles(i));
         float group_percent=group.factor*100.f;
-        ImGui::SetNextItemWidth(std::max(60.f,ImGui::GetContentRegionAvail().x-65.f));
+        const float reset_width=ImGui::CalcTextSize("100%").x+2.f*ImGui::GetStyle().FramePadding.x+ImGui::GetStyle().ItemSpacing.x;
+        ImGui::SetNextItemWidth(std::max(60.f*ui::scale(),ImGui::GetContentRegionAvail().x-reset_width));
         if(ImGui::SliderFloat("##group_factor",&group_percent,0.f,200.f,"%.0f%%",ImGuiSliderFlags_AlwaysClamp))group.factor=group_percent/100.f;
-        ImGui::SameLine();if(ImGui::SmallButton("100%"))group.factor=1.f;
+        ui::next_action("100%");if(ImGui::Button("100%"))group.factor=1.f;
         ImGui::EndDisabled();if(!editor->has_angles(i))ImGui::TextDisabled("No angular outputs");
         ImGui::PopID();
     }
     ImGui::EndChild();
     }
-    ImGui::BeginDisabled(!editor->can_save()||!editor->dirty());if(ImGui::Button("Save"))editor->store();ImGui::EndDisabled();
-    ImGui::SameLine();ImGui::BeginDisabled(!editor->dirty());if(ImGui::Button("Revert"))editor->revert();ImGui::EndDisabled();
-    ImGui::SameLine();if(ImGui::Button("Reset"))editor->reset();
+    ImGui::BeginDisabled(!editor->can_save()||!editor->dirty());if(ui::primary_button("Save"))editor->store();ImGui::EndDisabled();
+    ui::next_action("Revert");ImGui::BeginDisabled(!editor->dirty());if(ImGui::Button("Revert"))editor->revert();ImGui::EndDisabled();
+    ui::next_action("Reset");if(ImGui::Button("Reset"))editor->reset();
     if(!editor->status.empty())ImGui::TextWrapped("%s",editor->status.c_str());
     else if(!editor->can_save())ImGui::TextDisabled("No managed profile; live changes only");
     if(editor->dirty())ImGui::TextDisabled("Unsaved changes");
@@ -682,15 +717,16 @@ void animations_popup(const ImVec2& sz){
     if(!e){ImGui::TextDisabled("No active model");ImGui::End();return;}
     const auto& rows=e->rows;
     auto label=[&](int i){return i==animation::model_idle?std::string("Model default"):i==animation::no_idle?std::string("None"):animation::valid_index(i,rows)?rows[size_t(i)].file:std::string("Unknown");};
-    ImGui::SetNextItemWidth(-1);
-    if(ImGui::BeginCombo("##idle",("Idle: "+label(e->current.idle)).c_str())){
+    ui::field_label("Idle animation");
+    if(ImGui::BeginCombo("##idle",label(e->current.idle).c_str())){
         if(ImGui::Selectable("Model default",e->current.idle==animation::model_idle))e->idle(animation::model_idle);
         if(ImGui::Selectable("None",e->current.idle==animation::no_idle))e->idle(animation::no_idle);
         for(size_t i=0;i<rows.size();++i){ImGui::PushID(int(i));if(ImGui::Selectable((rows[i].file+" ("+rows[i].group+")").c_str(),e->current.idle==int(i)))e->idle(int(i));ImGui::PopID();}
         ImGui::EndCombo();
     }
-    ImGui::SliderFloat("Speed",&e->current.speed,.25f,2.f,"%.2fx",ImGuiSliderFlags_AlwaysClamp);
-    ImGui::TextDisabled("Speed applies to motions without sound.");
+    ui::field_label("Playback speed");
+    ImGui::SliderFloat("##playback_speed",&e->current.speed,.25f,2.f,"%.2fx",ImGuiSliderFlags_AlwaysClamp);
+    ImGui::SetItemTooltip("Speed applies to motions without sound");
     if(e->preview()>=0)ImGui::TextWrapped("Playing: %s",label(e->preview()).c_str());
     else if(e->playing()>=0)ImGui::TextWrapped("Idle: %s",label(e->playing()).c_str());
     else ImGui::TextDisabled("Idle mode");
@@ -701,19 +737,26 @@ void animations_popup(const ImVec2& sz){
     for(size_t i=0;i<rows.size();++i){
         const auto& row=rows[i];if(!ui_parameter_matches(row.group,animations_filter)&&!ui_parameter_matches(row.file,animations_filter))continue;
         ImGui::PushID(int(i));
-        if(ImGui::Selectable(row.file.c_str(),animation_selected==int(i)))animation_selected=int(i);
-        ImGui::TextDisabled("%s | %.2f s%s%s",row.group.c_str(),row.duration,row.loop?" | Native loop":"",row.sound?" | Sound":"");
+        if(ui::choice_row(row.file.c_str(),row.group.c_str(),animation_selected==int(i)))animation_selected=int(i);
         ImGui::PopID();
     }
     ImGui::EndChild();
     const bool selected=animation::valid_index(animation_selected,rows);
-    ImGui::BeginDisabled(!selected);if(ImGui::Button("Play"))e->play(animation_selected);ImGui::SameLine();if(ImGui::Button("Set as Idle"))e->idle(animation_selected);ImGui::EndDisabled();
-    ImGui::SameLine();if(ImGui::Button("Stop preview"))e->stop();
+    if(selected){
+        const auto& row=rows[size_t(animation_selected)];
+        ImGui::TextWrapped("%s",row.file.c_str());
+        ImGui::TextDisabled("%.2f s%s%s",row.duration,row.loop?"  |  Loop":"",row.sound?"  |  Sound":"");
+    }
+    ImGui::BeginDisabled(!selected);
+    if(ui::primary_button("Play"))e->play(animation_selected);
+    ui::next_action("Set as idle");if(ImGui::Button("Set as idle"))e->idle(animation_selected);
+    ImGui::EndDisabled();
+    ui::next_action("Stop preview");if(ImGui::Button("Stop preview"))e->stop();
     ImGui::Checkbox("Repeat preview",&e->repeat_preview);
     if(selected&&rows[size_t(animation_selected)].loop)ImGui::TextDisabled("Native looping motion: use Stop preview to return to Idle.");
-    ImGui::BeginDisabled(!e->can_save()||!e->dirty());if(ImGui::Button("Save"))e->store();ImGui::EndDisabled();
-    ImGui::SameLine();ImGui::BeginDisabled(!e->dirty());if(ImGui::Button("Revert"))e->revert();ImGui::EndDisabled();
-    ImGui::SameLine();if(ImGui::Button("Reset"))e->reset();
+    ImGui::BeginDisabled(!e->can_save()||!e->dirty());if(ui::primary_button("Save"))e->store();ImGui::EndDisabled();
+    ui::next_action("Revert");ImGui::BeginDisabled(!e->dirty());if(ImGui::Button("Revert"))e->revert();ImGui::EndDisabled();
+    ui::next_action("Reset");if(ImGui::Button("Reset"))e->reset();
     if(!e->status.empty())ImGui::TextWrapped("%s",e->status.c_str());
     else if(e->dirty())ImGui::TextDisabled("Unsaved changes");
     ImGui::End();
@@ -771,15 +814,15 @@ void twitch_panel(){
         ImGui::BeginDisabled(t.client[0]=='\0');
         if(ImGui::Button("Connect"))request(std::string("connect\t")+t.client);
         ImGui::EndDisabled();
-        ImGui::SameLine();if(ImGui::Button("Forget login"))request("logout");
+        ui::next_action("Forget login");if(ImGui::Button("Forget login"))request("logout");
     }else if(ImGui::Button(t.code.empty()?"Disconnect":"Cancel sign-in"))request("disconnect");
     if(!t.code.empty()){
         ImGui::Separator();
         ImGui::TextWrapped("Twitch code: %s",t.code.c_str());
         if(!t.codeRemaining.empty())ImGui::TextDisabled("Expires in %s s",t.codeRemaining.c_str());
         if(ImGui::Button("Open Twitch"))request("open");
-        ImGui::SameLine();if(ImGui::Button("Copy code"))ImGui::SetClipboardText(t.code.c_str());
-        ImGui::SameLine();if(ImGui::Button("Copy link"))ImGui::SetClipboardText(t.url.c_str());
+        ui::next_action("Copy code");if(ImGui::Button("Copy code"))ImGui::SetClipboardText(t.code.c_str());
+        ui::next_action("Copy link");if(ImGui::Button("Copy link"))ImGui::SetClipboardText(t.url.c_str());
     }
     if(!t.retryRemaining.empty()&&t.retryRemaining!="0")
         ImGui::TextDisabled("Retry in %s s",t.retryRemaining.c_str());
@@ -787,7 +830,7 @@ void twitch_panel(){
     if(t.approvalBlocked&&ImGui::Button("Request plugin approval"))request("approve");
     if(!t.requestError.empty())ImGui::TextWrapped("%s",t.requestError.c_str());
     if(t.status!="Connected")return;
-    ImGui::Separator();ImGui::TextUnformatted("Channel Points");ImGui::SameLine();if(ImGui::SmallButton("Refresh"))request("refresh");
+    ImGui::SeparatorText("Channel Points");if(ImGui::Button("Refresh rewards"))request("refresh");
     if(!t.localReady){ImGui::TextDisabled("Waiting for the Kawari plugin");return;}
     if(t.model.empty()){ImGui::TextDisabled("Waiting for model");return;}ImGui::TextDisabled("Model: %s",t.modelName.c_str());
     if(t.rewards.empty()){ImGui::TextDisabled("No rewards available");return;}
@@ -812,10 +855,10 @@ void twitch_panel(){
     const char* labels[]={"Toggle","Timed","On","Off"};const char* modes[]={"toggle","timed","on","off"};ImGui::TextUnformatted("Activation mode");ImGui::SetNextItemWidth(-1);ImGui::Combo("##reward_mode",&t.mode,labels,4);
     if(t.mode==1){ImGui::TextUnformatted("Duration (seconds)");ImGui::SetNextItemWidth(-1);ImGui::SliderFloat("##reward_duration",&t.duration,1.f,300.f,"%.0f");}
     const bool known=std::any_of(t.expressions.begin(),t.expressions.end(),[&](const std::pair<std::string,std::string>& e){return e.first==t.file;});
-    ImGui::BeginDisabled(!known);if(ImGui::Button("Save binding"))request("bind\t"+key+"\t"+t.file+"\t"+modes[t.mode]+"\t"+std::to_string(t.duration));ImGui::EndDisabled();
+    ImGui::BeginDisabled(!known);if(ui::primary_button("Save binding"))request("bind\t"+key+"\t"+t.file+"\t"+modes[t.mode]+"\t"+std::to_string(t.duration));ImGui::EndDisabled();
     const bool saved_known=std::any_of(t.expressions.begin(),t.expressions.end(),[&](const std::pair<std::string,std::string>& e){return e.first==selected->file;});
-    ImGui::SameLine();ImGui::BeginDisabled(!saved_known);if(ImGui::Button("Test saved"))request("test\t"+key);ImGui::EndDisabled();
-    ImGui::SameLine();ImGui::BeginDisabled(selected->file.empty());if(ImGui::Button("Remove")){request("unbind\t"+key);t.file.clear();t.mode=0;}ImGui::EndDisabled();
+    ui::next_action("Test saved");ImGui::BeginDisabled(!saved_known);if(ImGui::Button("Test saved"))request("test\t"+key);ImGui::EndDisabled();
+    ui::next_action("Remove binding");ImGui::BeginDisabled(selected->file.empty());if(ImGui::Button("Remove binding")){request("unbind\t"+key);t.file.clear();t.mode=0;}ImGui::EndDisabled();
     if(!selected->file.empty()){
       ImGui::TextWrapped("Saved: %s (%s)",selected->file.c_str(),selected->mode.c_str());
       if(!saved_known)ImGui::TextDisabled("Missing expression - remove or change binding");
@@ -886,14 +929,15 @@ void obs_panel(const std::string& dir){
         obs.request_error.clear();
         return true;
     };
-    ImGui::TextUnformatted(obs.status.c_str());
-    ImGui::InputInt("Port",&obs.port,0);
+    ImGui::TextWrapped("%s",obs.status.c_str());
+    ui::field_label("Port");ImGui::InputInt("##obs_port",&obs.port,0);
     obs.port=std::max(1,std::min(65535,obs.port));
-    ImGui::InputTextWithHint("Password",obs.password_saved?"Password saved":"OBS WebSocket password",
+    ui::field_label("Password");
+    ImGui::InputTextWithHint("##obs_password",obs.password_saved?"Password saved":"OBS WebSocket password",
                             obs.password,sizeof(obs.password),ImGuiInputTextFlags_Password);
     if(ImGui::Button(obs.enabled?"Reconnect":"Connect")&&request("connect\t"+std::to_string(obs.port)+"\t"+obs.password))
         std::fill(std::begin(obs.password),std::end(obs.password),0);
-    if(obs.enabled){ImGui::SameLine();if(ImGui::Button("Disconnect"))request("disconnect");}
+    if(obs.enabled){ui::next_action("Disconnect");if(ImGui::Button("Disconnect"))request("disconnect");}
     if(!obs.notice.empty())ImGui::TextWrapped("%s",obs.notice.c_str());
     if(!obs.request_error.empty())ImGui::TextWrapped("%s",obs.request_error.c_str());
 
@@ -908,7 +952,8 @@ void obs_panel(const std::string& dir){
     };
     if(!std::binary_search(obs.scenes.begin(),obs.scenes.end(),obs.scene))
         select_scene(obs.program.empty()?obs.scenes.front():obs.program);
-    if(ImGui::BeginCombo("Scene",obs.scene.c_str())){
+    ui::field_label("Scene");
+    if(ImGui::BeginCombo("##obs_scene_select",obs.scene.c_str())){
         for(const auto& scene:obs.scenes){
             ImGui::PushID(scene.c_str());
             if(ImGui::Selectable((scene+"###obs_scene").c_str(),obs.scene==scene))select_scene(scene);
@@ -919,7 +964,8 @@ void obs_panel(const std::string& dir){
     const auto selected=std::find_if(obs.expressions.begin(),obs.expressions.end(),[&](const std::pair<std::string,std::string>& expression){
         return expression.first==obs.expression;
     });
-    if(ImGui::BeginCombo("Expression",selected==obs.expressions.end()?"Choose an expression":selected->second.c_str())){
+    ui::field_label("Expression");
+    if(ImGui::BeginCombo("##obs_expression_select",selected==obs.expressions.end()?"Choose an expression":selected->second.c_str())){
         for(const auto& entry:obs.expressions){
             ImGui::PushID(entry.first.c_str());
             if(ImGui::Selectable((entry.second+"###obs_expression").c_str(),entry.first==obs.expression))obs.expression=entry.first;
@@ -928,15 +974,15 @@ void obs_panel(const std::string& dir){
         ImGui::EndCombo();
     }
     if(obs.expressions.empty())ImGui::TextDisabled("Add a position to an expression first.");
-    ImGui::InputInt("Delay (ms)",&obs.delay,50,250);
+    ui::field_label("Delay (ms)");ImGui::InputInt("##obs_delay",&obs.delay,50,250);
     obs.delay=std::max(0,std::min(30000,obs.delay));
     ImGui::SetItemTooltip("Time from the start of the OBS transition.");
     ImGui::BeginDisabled(selected==obs.expressions.end());
-    if(ImGui::Button("Save binding"))
+    if(ui::primary_button("Save binding"))
         request("bind\t"+obs.scene+"\t"+obs.expression+"\t"+std::to_string(obs.delay));
     ImGui::EndDisabled();
     const auto saved=obs.rules.find(obs.scene);
-    ImGui::SameLine();
+    ui::next_action("Remove binding");
     ImGui::BeginDisabled(saved==obs.rules.end());
     if(ImGui::Button("Remove binding")&&request("unbind\t"+obs.scene)){obs.expression.clear();obs.delay=0;}
     ImGui::EndDisabled();
@@ -961,7 +1007,7 @@ void plugins_popup(const ImVec2& sz){
     plugins_focus=false;if(!plugins_open)return;
     if(ui::begin_tool("Integrations###Plugins",plugins_open,sz,float(ui_bar_height(int(sz.y))),530.f,440.f)){
         plugins_focus=ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-        if(ImGui::BeginTabBar("##integrations_tabs")){
+        if(ImGui::BeginTabBar("##integrations_tabs",ImGuiTabBarFlags_FittingPolicyScroll)){
         if(ImGui::BeginTabItem(ui::tr("Plugins###plugins","Плагины###plugins"))){
         if(!plugin_ready)ImGui::TextDisabled("Waiting for API / Plugin Manager unavailable");
         else if(rows.empty())ImGui::TextDisabled("No plugin requests yet.");
@@ -970,9 +1016,13 @@ void plugins_popup(const ImVec2& sz){
             const auto base=dir+"/plugins-request";std::ifstream old(base+".tsv");if(old)return;
             std::ofstream out(base+".tmp",std::ios::trunc);out<<action<<'\t'<<r.key<<'\n';out.close();if(out&&std::rename((base+".tmp").c_str(),(base+".tsv").c_str())==0)plugins_status="Waiting...";else plugins_status="Cannot submit request";
         };
-        for(const auto& r:rows){ImGui::PushID(r.key.c_str());ImGui::TextUnformatted(r.name.c_str());ImGui::TextDisabled("%s | %s | %s connected",r.developer.c_str(),r.state.c_str(),r.count.c_str());
-            if(r.state=="Pending"||r.state=="Blocked"||r.state=="CLI allowed"){if(ImGui::Button(r.state=="CLI allowed"?"Keep permission":"Allow"))request(r,"allow");ImGui::SameLine();}
-            if(r.state!="Blocked"&&ImGui::Button(r.state=="Pending"?"Deny":"Revoke"))request(r,"block");
+        for(const auto& r:rows){ImGui::PushID(r.key.c_str());ImGui::TextWrapped("%s",r.name.c_str());ImGui::TextWrapped("%s | %s | %s connected",r.developer.c_str(),r.state.c_str(),r.count.c_str());
+            const char* decline=r.state=="Pending"?"Deny":"Revoke";
+            if(r.state=="Pending"||r.state=="Blocked"||r.state=="CLI allowed"){
+                if(ui::primary_button(r.state=="CLI allowed"?"Keep permission":"Allow"))request(r,"allow");
+                if(r.state!="Blocked")ui::next_action(decline);
+            }
+            if(r.state!="Blocked"&&ImGui::Button(decline))request(r,"block");
             ImGui::Separator();ImGui::PopID();}
         if(!plugins_status.empty())ImGui::TextWrapped("%s",plugins_status.c_str());
         ImGui::EndTabItem();}
@@ -984,6 +1034,142 @@ void plugins_popup(const ImVec2& sz){
             ImGui::EndTabItem();}
         ImGui::EndTabBar();}
     }ImGui::End();
+}
+bool placement_only(const ExpressionDetail& detail){
+    return detail.position&&detail.terms.empty()&&detail.items.empty();
+}
+const ExpressionRow* expression_list(bool hotkeys,const char* filter,std::string& selection){
+    std::vector<const ExpressionRow*> matches;
+    for(const auto& row:expression_rows)
+        if(row.hotkey==hotkeys&&ui_parameter_matches(row.name,filter))matches.push_back(&row);
+    if(matches.empty()){
+        ImGui::TextDisabled(hotkeys?"No matching hotkeys":"No matching expressions");
+        return nullptr;
+    }
+    const auto current=std::find_if(matches.begin(),matches.end(),[&](const ExpressionRow* row){return row->key==selection;});
+    const ExpressionRow* selected=current==matches.end()?matches.front():*current;
+    selection=selected->key;
+    const float preferred=ImGui::GetContentRegionAvail().y*.46f;
+    const float row_height=std::max(ImGui::GetFrameHeight(),28.f*ui::scale())+2.f*ui::scale();
+    const float content=2.f*ImGui::GetStyle().WindowPadding.y+matches.size()*row_height;
+    const float height=std::min(content,std::max(110.f*ui::scale(),preferred));
+    if(ImGui::BeginChild("##expression_choices",ImVec2(0,height),ImGuiChildFlags_Borders)){
+        for(const auto* row:matches){
+            const auto detail=expression_details.find(row->key);
+            const auto name=hotkeys?row->name:expression_display_name(row->name);
+            const auto status=hotkeys?(row->chord?shortcut_label(row->chord):"Unassigned"):
+                detail!=expression_details.end()&&placement_only(detail->second)?"Placement":row->active?"Active":"";
+            ImGui::PushID(row->key.c_str());
+            if(ui::choice_row(name.c_str(),status.c_str(),row==selected)){
+                if(row!=selected&&hotkeys){recording_key.clear();expression_management_ui.delete_hotkey.clear();}
+                selection=row->key;selected=row;
+            }
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+    return selected;
+}
+void expression_actions(const ExpressionRow& row){
+    const auto found=expression_details.find(row.key);
+    const auto* detail=found==expression_details.end()?nullptr:&found->second;
+    ImGui::PushID(row.key.c_str());
+    ImGui::SeparatorText("Selected expression");
+    ImGui::TextWrapped("%s",expression_display_name(row.name).c_str());
+    const char* action=detail&&placement_only(*detail)?"Move model":row.active?"Deactivate":"Activate";
+    if(ui::primary_button(action))expression_request("toggle",row.key);
+    ui::next_action("Edit");
+    ImGui::BeginDisabled(row.active||!detail);
+    if(ImGui::Button("Edit"))expression_editor_begin(&row);
+    if(row.active&&ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Deactivate the expression before editing");
+    ImGui::EndDisabled();
+    ui::next_action("Duplicate");
+    ImGui::BeginDisabled(!detail);
+    if(ImGui::Button("Duplicate"))expression_editor_begin(&row,true);
+    ImGui::EndDisabled();
+
+    auto& management=expression_management_ui;
+    if(detail){
+        if(!placement_only(*detail))
+            ImGui::TextDisabled("%zu parameters   %zu items",detail->terms.size(),detail->items.size());
+        if(!detail->group.empty())ImGui::TextWrapped("Group: %s",detail->group.c_str());
+        if(detail->protected_expression)ImGui::TextDisabled("Protected customization");
+        if(ImGui::TreeNode("Manage expression")){
+            if(management.key!=row.key){
+                management=ExpressionManagementUi{};management.key=row.key;
+                management.protected_expression=detail->protected_expression;
+                std::snprintf(management.group,sizeof(management.group),"%s",detail->group.c_str());
+                std::snprintf(management.hotkey,sizeof(management.hotkey),"%s",expression_display_name(row.name).c_str());
+            }
+            ImGui::BeginDisabled(row.active);
+            ui::field_label("Exclusive group");
+            ImGui::InputTextWithHint("##group","Empty = independent",management.group,sizeof(management.group));
+            ImGui::Checkbox("Protected customization",&management.protected_expression);
+            if(ImGui::Button("Save rules"))
+                expression_send("configure-expression\t"+row.key+"\t"+management.group+"\t"+(management.protected_expression?"1":"0"));
+            ImGui::EndDisabled();
+
+            ImGui::Spacing();
+            ui::field_label("Hotkey name");
+            ImGui::InputText("##new_hotkey",management.hotkey,sizeof(management.hotkey));
+            ImGui::BeginDisabled(!management.hotkey[0]);
+            if(ImGui::Button("Create hotkey"))expression_send("new-hotkey\t"+row.key+"\t"+management.hotkey);
+            ImGui::EndDisabled();
+
+            ImGui::Spacing();
+            ImGui::BeginDisabled(row.active);
+            if(!management.confirm_delete){
+                if(ImGui::Button("Delete expression"))management.confirm_delete=true;
+            }else{
+                ImGui::TextWrapped("Delete this expression and its hotkeys from the model profile?");
+                if(ImGui::Button("Confirm deletion")&&expression_request("delete-expression",row.key))management=ExpressionManagementUi{};
+                ui::next_action("Cancel");
+                if(ImGui::Button("Cancel"))management.confirm_delete=false;
+            }
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+    }
+    ImGui::PopID();
+}
+void hotkey_actions(const ExpressionRow& row){
+    ImGui::PushID(row.key.c_str());
+    ImGui::SeparatorText("Selected hotkey");
+    ImGui::TextWrapped("%s",row.name.c_str());
+    if(ui::primary_button("Trigger"))expression_request("trigger",row.key);
+    const bool recording=recording_key==row.key;
+    const auto shortcut=recording?std::string("Press shortcut..."):row.chord?"Change shortcut":"Assign shortcut";
+    ui::next_action(shortcut.c_str());
+    ImGui::BeginDisabled(row.global);
+    if(ImGui::Button((shortcut+"###record-shortcut").c_str())){
+        recording_key=row.key;expression_status.clear();shortcut_events.clear();
+    }
+    ImGui::EndDisabled();
+    if(recording){
+        ui::next_action("Cancel");
+        if(ImGui::Button("Cancel"))recording_key.clear();
+    }
+    if(row.chord)ImGui::Text("Shortcut: %s",shortcut_label(row.chord).c_str());
+    else ImGui::TextDisabled("No shortcut assigned");
+    bool global=row.global;
+    ImGui::BeginDisabled(!row.chord);
+    if(ImGui::Checkbox("Global shortcut",&global)){recording_key.clear();expression_request("global",row.key,global?1:0);}
+    ImGui::EndDisabled();
+    ImGui::BeginDisabled(!row.chord);
+    if(ImGui::Button("Clear shortcut")){recording_key.clear();expression_request("bind",row.key,0);}
+    ImGui::EndDisabled();
+    auto& deleting=expression_management_ui.delete_hotkey;
+    if(deleting==row.key){
+        ImGui::TextWrapped("Delete this hotkey?");
+        if(ImGui::Button("Confirm deletion")&&expression_request("delete-hotkey",row.key)){recording_key.clear();deleting.clear();}
+        ui::next_action("Cancel deletion");
+        if(ImGui::Button("Cancel deletion"))deleting.clear();
+    }else{
+        ui::next_action("Delete hotkey");
+        if(ImGui::Button("Delete hotkey")){recording_key.clear();deleting=row.key;}
+    }
+    ImGui::PopID();
 }
 void expressions_popup(const ImVec2& sz,GLFWwindow* window){
     auto dir=expression_ui_directory();if(dir!=expression_dir){expression_reset();expression_dir=dir;}
@@ -1041,80 +1227,33 @@ void expressions_popup(const ImVec2& sz,GLFWwindow* window){
     shortcut_events.clear();
     if(!expression_open)return;
     if(ui::begin_tool("Expressions & Hotkeys",expression_open,sz,float(ui_bar_height(int(sz.y))),520.f,500.f)){
-      if(expression_rows.empty())ImGui::TextDisabled("No expressions or waiting for API");
+      if(expression_dir.empty())ImGui::TextDisabled("Waiting for Kawari API");
       ImGui::BeginDisabled(expression_wait);
       if(expression_draft.open){expression_editor_draw();}
-      else if(ImGui::BeginTabBar("##expression_tabs")){
-      if(ImGui::BeginTabItem(ui::tr("Expressions###expressions","Выражения###expressions"))){
-        recording_key.clear();
-        if(ImGui::Button("New expression"))expression_editor_begin(nullptr);
-        if(ImGui::Button("Deactivate all"))expression_request("deactivate-all","model");
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Keep protected customization expressions active");
-        ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##expression_filter","Search expressions",expression_filter,sizeof(expression_filter));
-        size_t matches=0;
-        for(const auto& r:expression_rows){if(r.hotkey||!ui_parameter_matches(r.name,expression_filter))continue;++matches;
-          ImGui::PushID(r.key.c_str());bool active=r.active;
-          const auto detail=expression_details.find(r.key);
-          const bool placement_only=detail!=expression_details.end()&&detail->second.position&&
-                                    detail->second.terms.empty()&&detail->second.items.empty();
-          if(placement_only){
-            if(ImGui::SmallButton("Move model"))expression_request("toggle",r.key);
-            ImGui::SameLine();ImGui::TextWrapped("%s",r.name.c_str());
-          }else{
-            if(ImGui::Checkbox((r.name+"###expression-toggle").c_str(),&active))expression_request("toggle",r.key);
-            if(detail!=expression_details.end()){
-              ImGui::TextDisabled("Fade in %.2f s | Fade out %.2f s",detail->second.fade,detail->second.fade_out);
-              ImGui::TextDisabled("%zu parameters | %zu items",detail->second.terms.size(),detail->second.items.size());
+      else if(ImGui::BeginTabBar("##expression_tabs",ImGuiTabBarFlags_FittingPolicyScroll)){
+        if(ImGui::BeginTabItem(ui::tr("Expressions###expressions","Выражения###expressions"))){
+            recording_key.clear();
+            if(ui::primary_button("New expression"))expression_editor_begin(nullptr);
+            ui::next_action("Deactivate all");
+            if(ImGui::Button("Deactivate all"))expression_request("deactivate-all","model");
+            ImGui::SetItemTooltip("Keep protected customization expressions active");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##expression_filter","Search expressions",expression_filter,sizeof(expression_filter));
+            if(const auto* row=expression_list(false,expression_filter,selected_expression))expression_actions(*row);
+            ImGui::EndTabItem();
+        }
+        if(ImGui::BeginTabItem(ui::tr("Hotkeys###hotkeys","Клавиши###hotkeys"))){
+            if(std::any_of(expression_rows.begin(),expression_rows.end(),[](const ExpressionRow& row){return row.hotkey;})){
+                if(ImGui::Button("Import VTS shortcuts")){recording_key.clear();shortcut_events.clear();expression_request("import-vts","model");}
+                ImGui::SetItemTooltip("Fill unassigned hotkeys from VTube Studio");
             }
-          }
-          ImGui::BeginDisabled(r.active||!expression_details.count(r.key));if(ImGui::SmallButton("Edit"))expression_editor_begin(&r);ImGui::EndDisabled();
-          ImGui::SameLine();ImGui::BeginDisabled(!expression_details.count(r.key));if(ImGui::SmallButton("Duplicate"))expression_editor_begin(&r,true);ImGui::EndDisabled();
-          auto& m=expression_management_ui;
-          if(detail!=expression_details.end()){
-            if(!detail->second.group.empty())ImGui::TextWrapped("Group: %s",detail->second.group.c_str());
-            if(detail->second.protected_expression)ImGui::TextDisabled("Protected customization");
-            if(ImGui::SmallButton(m.key==r.key?"Close management":"Manage")){
-              if(m.key==r.key)m=ExpressionManagementUi{};
-              else{m=ExpressionManagementUi{};m.key=r.key;m.protected_expression=detail->second.protected_expression;std::snprintf(m.group,sizeof(m.group),"%s",detail->second.group.c_str());auto label=r.name;const std::string suffix=".exp3.json";if(label.size()>=suffix.size()&&label.compare(label.size()-suffix.size(),suffix.size(),suffix)==0)label.resize(label.size()-suffix.size());std::snprintf(m.hotkey,sizeof(m.hotkey),"%s",label.c_str());}
-            }
-            if(m.key==r.key){
-              ImGui::BeginDisabled(r.active);ImGui::TextUnformatted("Exclusive group");ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##group","Empty = independent",m.group,sizeof(m.group));ImGui::Checkbox("Protected customization",&m.protected_expression);
-              if(ImGui::Button("Save rules"))expression_send("configure-expression\t"+r.key+"\t"+m.group+"\t"+(m.protected_expression?"1":"0"));ImGui::EndDisabled();
-              ImGui::TextUnformatted("New hotkey");ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##new_hotkey","Hotkey name",m.hotkey,sizeof(m.hotkey));
-              ImGui::BeginDisabled(!m.hotkey[0]);if(ImGui::Button("Create hotkey"))expression_send("new-hotkey\t"+r.key+"\t"+m.hotkey);ImGui::EndDisabled();
-              ImGui::BeginDisabled(r.active);if(!m.confirm_delete){if(ImGui::SmallButton("Delete expression"))m.confirm_delete=true;}else{ImGui::TextWrapped("Remove this expression and its hotkeys from the profile? Twitch bindings must be removed separately.");if(ImGui::SmallButton("Confirm deletion")){if(expression_request("delete-expression",r.key))m=ExpressionManagementUi{};}ImGui::SameLine();if(ImGui::SmallButton("Cancel deletion"))m.confirm_delete=false;}ImGui::EndDisabled();
-            }
-          }
-          ImGui::Separator();ImGui::PopID();}
-        if(!matches)ImGui::TextDisabled("No matching expressions");
-        ImGui::EndTabItem();}
-      if(ImGui::BeginTabItem(ui::tr("Hotkeys###hotkeys","Клавиши###hotkeys"))){
-      ImGui::SetNextItemWidth(-1);if(ImGui::InputTextWithHint("##hotkey_filter","Search hotkeys",hotkey_filter,sizeof(hotkey_filter)))recording_key.clear();
-      if(std::any_of(expression_rows.begin(),expression_rows.end(),[](const ExpressionRow& r){return r.hotkey;})){
-        if(ImGui::Button("Import VTS shortcuts")){recording_key.clear();shortcut_events.clear();expression_request("import-vts","model");}
-        if(ImGui::IsItemHovered())ImGui::SetTooltip("Fill unassigned hotkeys from VTube Studio. Existing bindings stay unchanged.");
-        ImGui::Separator();
+            ImGui::SetNextItemWidth(-1);
+            if(ImGui::InputTextWithHint("##hotkey_filter","Search hotkeys",hotkey_filter,sizeof(hotkey_filter)))recording_key.clear();
+            if(const auto* row=expression_list(true,hotkey_filter,selected_hotkey))hotkey_actions(*row);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
       }
-      size_t matches=0;
-      for(const auto& r:expression_rows){if(!r.hotkey||!ui_parameter_matches(r.name,hotkey_filter))continue;++matches;ImGui::PushID(r.key.c_str());
-          ImGui::TextWrapped("%s",r.name.c_str());
-          if(ImGui::SmallButton("Trigger"))expression_request("trigger",r.key);
-          ImGui::SameLine();bool global=r.global;ImGui::BeginDisabled(!r.chord);if(ImGui::Checkbox("Global",&global)){recording_key.clear();expression_request("global",r.key,global?1:0);}ImGui::EndDisabled();
-          const bool recording=recording_key==r.key;
-          ImGui::BeginDisabled(r.global);
-          if(ImGui::Button((std::string(recording?"Press shortcut...":shortcut_label(r.chord))+"###record-shortcut").c_str())){
-              recording_key=r.key;expression_status.clear();shortcut_events.clear();
-          }
-          ImGui::EndDisabled();
-          ImGui::SameLine();if(ImGui::SmallButton("Clear")){recording_key.clear();expression_request("bind",r.key,0);}
-          if(recording){ImGui::SameLine();if(ImGui::SmallButton("Cancel"))recording_key.clear();}
-          auto& deleting=expression_management_ui.delete_hotkey;
-          if(deleting==r.key){if(ImGui::SmallButton("Confirm hotkey deletion")){recording_key.clear();if(expression_request("delete-hotkey",r.key))deleting.clear();}ImGui::SameLine();if(ImGui::SmallButton("Cancel deletion"))deleting.clear();}
-          else if(ImGui::SmallButton("Delete hotkey")){recording_key.clear();deleting=r.key;}
-          ImGui::Separator();ImGui::PopID();}
-      if(!matches)ImGui::TextDisabled("No matching hotkeys");
-      ImGui::EndTabItem();}
-      ImGui::EndTabBar();}
       ImGui::EndDisabled();if(!global_status.empty())ImGui::TextWrapped("%s",global_status.c_str());if(!recording_key.empty())ImGui::TextDisabled("Press a key with any modifiers. Esc cancels.");if(!expression_status.empty())ImGui::TextWrapped("%s",expression_status.c_str());
     }ImGui::End();
     if(!expression_open){recording_key.clear();expression_editor_close();expression_management_ui=ExpressionManagementUi{};}
@@ -1146,27 +1285,111 @@ bool init(GLFWwindow* window,VkInstance inst,VkPhysicalDevice gpu,VkDevice dev,V
 }
 constexpr ImGuiWindowFlags flags=ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_NoScrollWithMouse|ImGuiWindowFlags_NoBringToFrontOnFocus;
 bool items_open=false,items_drag=false,items_mouse=false,items_changed=false;
-int item_selected=-1;char item_path[4096]{};
+int item_selected=-1;char item_path[4096]{},mesh_filter[129]{};
+bool items_pick=false;
+std::string attachment_message;
 void items_popup(const ImVec2& sz){
-    if(!items_open){items_drag=false;items_mouse=false;return;}
+    if(!items_open){items_drag=false;items_mouse=false;items_pick=false;return;}
     auto& sc=items::scene();if(!ui::begin_tool("Items",items_open,sz,float(ui_bar_height(int(sz.y))),440.f,550.f)){ImGui::End();return;}
     if(!offscreen())ImGui::TextWrapped("Items require offscreen/broadcast rendering.");
-    ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##item_path","Absolute PNG or GIF path",item_path,sizeof(item_path));
-    if(ImGui::Button("Import")&&sc.rows.size()<32){items::Item item;if(items::import_file(item_path,item,sc.error)){sc.rows.push_back(item);item_selected=int(sc.rows.size())-1;sc.persist();item_path[0]=0;}}
-    ImGui::SameLine();ImGui::TextDisabled("%zu / 32",sc.rows.size());
+    ui::field_label("PNG or GIF file");
+    ImGui::InputTextWithHint("##item_path","Absolute path",item_path,sizeof(item_path));
+    ImGui::BeginDisabled(!item_path[0]||sc.rows.size()>=32);
+    if(ui::primary_button("Import item")){
+        items::Item item;
+        if(items::import_file(item_path,item,sc.error)){
+            sc.rows.push_back(item);item_selected=int(sc.rows.size())-1;items_pick=false;attachment_message.clear();sc.persist();item_path[0]=0;
+        }
+    }
+    ImGui::EndDisabled();
+    if(sc.rows.size()>=32){ImGui::SameLine();ImGui::TextDisabled("Scene is full");}
     if(!sc.error.empty())ImGui::TextWrapped("%s",sc.error.c_str());
-    if(ImGui::BeginChild("##items_list",ImVec2(0,110*ui::scale()),ImGuiChildFlags_Borders)){
-        for(size_t j=0;j<sc.rows.size();++j){auto& it=sc.rows[j];auto name=it.path.substr(it.path.find_last_of('/')+1);ImGui::PushID(int(j));if(ImGui::Selectable((name+"###item").c_str(),item_selected==int(j))){item_selected=int(j);items_mouse=false;}ImGui::PopID();}
-    }ImGui::EndChild();
+    if(sc.rows.empty())ImGui::TextDisabled("No items in this scene");
+    else{
+        if(ImGui::BeginChild("##items_list",ImVec2(0,115.f*ui::scale()),ImGuiChildFlags_Borders)){
+            for(size_t j=0;j<sc.rows.size();++j){
+                const auto& item=sc.rows[j];
+                const auto name=item.path.substr(item.path.find_last_of('/')+1);
+                ImGui::PushID(int(j));
+                if(ui::choice_row(name.c_str(),item.visible?"":"Hidden",item_selected==int(j))){
+                    item_selected=int(j);items_mouse=false;items_pick=false;attachment_message.clear();
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+    }
     if(item_selected>=0&&size_t(item_selected)<sc.rows.size()){
-        auto& it=sc.rows[size_t(item_selected)];bool change=false;change|=ImGui::Checkbox("Visible",&it.visible);ImGui::SameLine();change|=ImGui::Checkbox("Locked",&it.locked);
-        bool attach=it.attached;if(ImGui::Checkbox("Attach to model root",&attach)){float x,y;camera_offset(x,y);items::attach(it,attach,camera_scale(),x,y);change=true;}
-        change|=ImGui::Checkbox("Behind model",&it.behind);ImGui::TextDisabled("Root attachment follows pan and zoom, not mesh deformation.");
-        ImGui::BeginDisabled(it.locked);change|=ImGui::DragFloat("X",&it.x,.005f,-10000,10000,"%.3f",ImGuiSliderFlags_AlwaysClamp);change|=ImGui::DragFloat("Y",&it.y,.005f,-10000,10000,"%.3f",ImGuiSliderFlags_AlwaysClamp);change|=ImGui::DragFloat("Size",&it.size,.005f,.001f,10000,"%.3f",ImGuiSliderFlags_AlwaysClamp);change|=ImGui::SliderFloat("Rotation",&it.angle,-180,180,"%.0f deg");change|=ImGui::SliderFloat("Opacity",&it.opacity,0,1);ImGui::Checkbox("Drag selected in preview",&items_drag);ImGui::EndDisabled();
-        if(it.locked)items_drag=false;
-        if(ImGui::Button("Move down")&&item_selected>0){std::swap(sc.rows[size_t(item_selected)],sc.rows[size_t(item_selected-1)]);--item_selected;change=true;}
-        ImGui::SameLine();if(ImGui::Button("Move up")&&size_t(item_selected+1)<sc.rows.size()){std::swap(sc.rows[size_t(item_selected)],sc.rows[size_t(item_selected+1)]);++item_selected;change=true;}
-        if(ImGui::Button("Remove from scene")){sc.rows.erase(sc.rows.begin()+item_selected);item_selected=-1;items_mouse=false;change=true;}
+        auto& item=sc.rows[size_t(item_selected)];
+        ImGui::SeparatorText("Selected item");
+        ImGui::TextWrapped("%s",item.path.substr(item.path.find_last_of('/')+1).c_str());
+        bool change=ImGui::Checkbox("Visible",&item.visible);
+        ui::next_action("Locked");change|=ImGui::Checkbox("Locked",&item.locked);
+        change|=ImGui::Checkbox("Behind model",&item.behind);
+
+        ImGui::SeparatorText("Attachment");
+        ImGui::BeginDisabled(item.locked);
+        ImGui::SetNextItemWidth(-1);
+        if(ImGui::BeginCombo("##item_attachment",item.mesh?item.mesh.id.c_str():item.attached?"Model root":"Canvas")){
+            auto attach=[&](bool root){
+                if(items::attach_to_root(item,root)){change=true;attachment_message.clear();}
+                else attachment_message="Could not preserve this placement.";
+                items_pick=false;
+            };
+            if(ImGui::Selectable("Canvas",!item.mesh&&!item.attached))attach(false);
+            if(ImGui::Selectable("Model root",!item.mesh&&item.attached))attach(true);
+            ImGui::SeparatorText("ArtMeshes");
+            ImGui::SetNextItemWidth(-1);
+            ImGui::InputTextWithHint("##mesh_filter","Search ArtMeshes",mesh_filter,sizeof(mesh_filter));
+            const auto& ids=items::artmesh_ids();
+            if(ids.empty())ImGui::TextDisabled("No ArtMeshes available");
+            for(const auto& id:ids){
+                if(!ui_parameter_matches(id,mesh_filter))continue;
+                ImGui::PushID(id.c_str());
+                if(ImGui::Selectable((id+"###mesh").c_str(),item.mesh.id==id&&items::mesh_available(item))){
+                    if(items::attach_to_mesh(item,id)){change=true;attachment_message.clear();}
+                    else attachment_message="Could not attach to this ArtMesh.";
+                    items_pick=false;
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::BeginDisabled(items::artmesh_ids().empty());
+        if(ImGui::Button(items_pick?"Cancel picking":"Pick ArtMesh in preview")){
+            items_pick=!items_pick;items_mouse=false;attachment_message.clear();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        if(items_pick)ImGui::TextWrapped("Click an ArtMesh in the preview. Esc cancels.");
+        if(item.mesh&&!items::mesh_available(item))ImGui::TextWrapped("This item's ArtMesh is unavailable on the active model.");
+        if(!attachment_message.empty())ImGui::TextWrapped("%s",attachment_message.c_str());
+
+        ImGui::SeparatorText("Placement");
+        ImGui::BeginDisabled(item.locked);
+        ImGui::Checkbox("Drag selected in preview",&items_drag);
+        ui::field_label(item.mesh?"Offset along the mesh":"X");change|=ImGui::DragFloat("##item_x",&item.x,.005f,-10000,10000,"%.3f",ImGuiSliderFlags_AlwaysClamp);
+        ui::field_label(item.mesh?"Offset across the mesh":"Y");change|=ImGui::DragFloat("##item_y",&item.y,.005f,-10000,10000,"%.3f",ImGuiSliderFlags_AlwaysClamp);
+        ui::field_label("Size");change|=ImGui::DragFloat("##item_size",&item.size,.005f,.001f,10000,"%.3f",ImGuiSliderFlags_AlwaysClamp);
+        ui::field_label("Rotation");change|=ImGui::SliderFloat("##item_rotation",&item.angle,-180,180,"%.0f deg");
+        ui::field_label("Opacity");change|=ImGui::SliderFloat("##item_opacity",&item.opacity,0,1);
+        ImGui::EndDisabled();
+        if(item.locked){items_drag=false;items_pick=false;}
+        ImGui::SeparatorText("Layer order");
+        ImGui::BeginDisabled(item_selected==0);
+        if(ImGui::Button("Send backward")){
+            std::swap(sc.rows[size_t(item_selected)],sc.rows[size_t(item_selected-1)]);--item_selected;change=true;
+        }
+        ImGui::EndDisabled();
+        ui::next_action("Bring forward");
+        ImGui::BeginDisabled(size_t(item_selected+1)>=sc.rows.size());
+        if(ImGui::Button("Bring forward")){
+            std::swap(sc.rows[size_t(item_selected)],sc.rows[size_t(item_selected+1)]);++item_selected;change=true;
+        }
+        ImGui::EndDisabled();
+        if(ImGui::Button("Remove from scene")){
+            sc.rows.erase(sc.rows.begin()+item_selected);item_selected=-1;items_mouse=false;items_pick=false;attachment_message.clear();change=true;
+        }
         if(change)items_changed=true;
     }
     if(items_changed&&!ImGui::IsMouseDown(ImGuiMouseButton_Left)&&!ImGui::IsAnyItemActive()){sc.persist();items_changed=false;}
@@ -1297,7 +1520,8 @@ bool ui_begin(GLFWwindow* window,VkInstance inst,VkPhysicalDevice gpu,VkDevice d
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Kawari");
     ImGui::SameLine();if(ImGui::Button(ui_compact_bars()?ui::tr("Studio###compact","Студия###compact"):ui::tr("Stream###compact","Стрим###compact")))toggle_compact=true;
-    if(sz.x>=430){ImGui::SameLine();ImGui::TextDisabled("%s | %d parameters",model_name().c_str(),parameter_count);}
+    const auto model_status=model_name()+" | "+std::to_string(parameter_count)+" parameters";
+    ui::toolbar_status(model_status.c_str());
     ImGui::End();
     navigation(sz,initial);
     const int dock=docked_tool();
@@ -1321,8 +1545,11 @@ bool ui_begin(GLFWwindow* window,VkInstance inst,VkPhysicalDevice gpu,VkDevice d
     if(ImGui::IsItemHovered())ImGui::SetTooltip("%s",ui::tr(
         "Preview only. Fit frames the whole output. Fill crops to the workspace. The dock can cover part of the image.",
         "Только для предпросмотра. «Вписать» показывает весь вывод. «Заполнить» обрезает его по области просмотра. Панель может перекрыть часть изображения."));
-    if(sz.x>=360){ImGui::SameLine();ImGui::TextDisabled("Zoom %.0f%%",camera_scale()*100.f);}
-    if(sz.x>=680){ImGui::SameLine();ImGui::TextDisabled("Output %d x %d | UI %.0f FPS",output.width,output.height,io.Framerate);}
+    char zoom_status[48],output_status[96];
+    std::snprintf(zoom_status,sizeof(zoom_status),"Zoom %.0f%%",camera_scale()*100.f);
+    std::snprintf(output_status,sizeof(output_status),"Output %d x %d | UI %.0f FPS",output.width,output.height,io.Framerate);
+    ui::toolbar_status(zoom_status);
+    ui::toolbar_status(output_status);
     // Open and render the library popup from the same ID scope every frame.
     library_popup(sz);
     ImGui::End();
@@ -1333,10 +1560,28 @@ bool ui_begin(GLFWwindow* window,VkInstance inst,VkPhysicalDevice gpu,VkDevice d
     const bool focused=glfwGetWindowAttrib(window,GLFW_FOCUSED)==GLFW_TRUE;
     if(ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel)){dragging=false;items_mouse=false;}
     if(!focused || !ImGui::IsMouseDown(ImGuiMouseButton_Left) || !ImGui::IsMousePosValid()) {dragging=false;if(items_mouse){items_mouse=false;if(items_changed){items::scene().persist();items_changed=false;}}}
+    auto selected_item=[&]() -> items::Item* {
+        if(!items_open||item_selected<0)return nullptr;
+        auto& rows=items::scene().rows;
+        return size_t(item_selected)<rows.size()?&rows[size_t(item_selected)]:nullptr;
+    };
+    if(!focused||ImGui::IsKeyPressed(ImGuiKey_Escape,false))items_pick=false;
     if(focused && inside && !ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel) && !io.WantCaptureMouse && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        if(items_open&&items_drag&&item_selected>=0&&size_t(item_selected)<items::scene().rows.size()&&!items::scene().rows[size_t(item_selected)].locked){items_mouse=true;dragging=false;}else dragging=true;previous_mouse=pos;
+        auto* item=selected_item();
+        if(items_pick&&item){
+            if(items::pick_artmesh(*item,2.f*(pos.x-rect.x)/rect.w-1.f,1.f-2.f*(pos.y-rect.y)/rect.h)){
+                items_pick=false;attachment_message.clear();items_changed=true;
+            }else attachment_message="No visible ArtMesh at that point.";
+            dragging=false;
+        }else if(items_drag&&item&&!item->locked){items_mouse=true;dragging=false;}
+        else dragging=true;
+        previous_mouse=pos;
     }
-    if(items_mouse&&items_open&&item_selected>=0&&size_t(item_selected)<items::scene().rows.size()&&rect.w>0&&rect.h>0){auto& it=items::scene().rows[size_t(item_selected)];float z=it.attached?camera_scale():1.f;it.x=std::max(-10000.f,std::min(10000.f,it.x+2.f*(pos.x-previous_mouse.x)/rect.w/z));it.y=std::max(-10000.f,std::min(10000.f,it.y-2.f*(pos.y-previous_mouse.y)/rect.h/z));previous_mouse=pos;items_changed=true;}
+    if(items_mouse&&rect.w>0&&rect.h>0){
+        if(auto* item=selected_item())
+            items_changed|=items::move_item(*item,2.f*(pos.x-previous_mouse.x)/rect.w,2.f*(previous_mouse.y-pos.y)/rect.h);
+        previous_mouse=pos;
+    }
     if(dragging && rect.w>0 && rect.h>0) {
         camera_pan(2.f*(pos.x-previous_mouse.x)/rect.w,-2.f*(pos.y-previous_mouse.y)/rect.h);
         previous_mouse=pos;
@@ -1354,7 +1599,7 @@ void ui_draw(VkCommandBuffer cmd) {
     frame_ready=false;
 }
 void ui_model_changed(){
-    items_mouse=false;
+    items_mouse=false;items_pick=false;attachment_message.clear();mesh_filter[0]=0;
     // Do not reopen editors belonging to the previous model after Stream mode.
     for(int i=0;i<4;++i)stream_hidden[i]=false;
     expression_reset();

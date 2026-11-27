@@ -312,7 +312,8 @@ void LAppModel::SetupModel(ICubismModelSetting* setting)""", 'parameter updater 
     # P0.2b: optional PipeWire output using the very same Cubism device/queue.
     view = files[src / 'LAppView.cpp']
     view = rep(view, '#include "studio_controls.hpp"', '#include "studio_controls.hpp"\n#include "studio_broadcast.hpp"\n#include "studio_items_vk.hpp"', 'broadcast view include')
-    view = rep(view, '    live2DManager->OnUpdate();', '''    live2DManager->OnUpdate();
+    view = rep(view, '    live2DManager->OnUpdate();', '''    studio::items::begin_mesh_frame();
+    live2DManager->OnUpdate();
     if (_renderTarget == SelectTarget_ModelFrameBuffer && live2DManager->GetModelNum() > 0)
     {
         LAppModel* model = live2DManager->GetModel(0);
@@ -325,6 +326,15 @@ void LAppModel::SetupModel(ICubismModelSetting* setting)""", 'parameter updater 
         }
     }''', 'broadcast model texture')
     files[src / 'LAppView.cpp'] = view
+    model = files[src / 'LAppModel.cpp']
+    model = rep(model, '#include "studio_controls.hpp"', '#include "studio_controls.hpp"\n#include "studio_items_vk.hpp"', 'ArtMesh capture include')
+    model = rep(model, '    matrix.MultiplyByMatrix(_modelMatrix);', '''    matrix.MultiplyByMatrix(_modelMatrix);
+    if (_renderBuffer.IsValid()) {
+        studio::items::capture_mesh_frame(*_model, matrix.GetArray(),
+            _renderBuffer.GetBufferWidth(), _renderBuffer.GetBufferHeight());
+    }''', 'ArtMesh capture projection')
+    model = rep(model, 'LAppModel::~LAppModel()\n{', 'LAppModel::~LAppModel()\n{\n    studio::items::forget_mesh_model(_model);', 'ArtMesh capture release')
+    files[src / 'LAppModel.cpp'] = model
     vm = files[src / 'VulkanManager.cpp']
     vm = rep(vm, '#include "VulkanManager.hpp"', '#include "VulkanManager.hpp"\n#include "studio_broadcast.hpp"\n#include "studio_items_vk.hpp"\n#include <vector>\n#include <cstdlib>\n#include <cstdio>\n#include <cstring>', 'broadcast device include')
     vm = rep(vm, '    return indices.IsComplete() && swapChainAdequate && supportedFeatures.samplerAnisotropy;', '    return indices.IsComplete() && swapChainAdequate && supportedFeatures.samplerAnisotropy && (!studio::broadcast_requested() || studio::broadcast_extensions(device));', 'broadcast device suitability')
@@ -746,7 +756,7 @@ void LAppModel::StudioReleaseTexturesExcept(LAppModel* keep)
     # Validate all anchors before writing any files.
     for p, contents in files.items():
         p.write_text(contents, encoding='utf-8')
-    for name in ('studio_controls.hpp', 'studio_controls.cpp', 'studio_broadcast.hpp', 'studio_broadcast.cpp', 'studio_render_size.hpp', 'studio_background.hpp', 'studio_parameters.hpp', 'studio_parameter_socket.hpp', 'studio_ui_layout.hpp', 'studio_ui.hpp', 'studio_ui.cpp', 'studio_ui_theme.hpp', 'studio_ui_preferences.hpp', 'studio_physics_settings.hpp', 'studio_physics.hpp', 'studio_animations.hpp', 'studio_items.hpp', 'studio_items_image.cpp', 'studio_items_vk.hpp', 'studio_items_vk.cpp', 'studio_app_icon.hpp', 'studio_app_icon.cpp'):
+    for name in ('studio_controls.hpp', 'studio_controls.cpp', 'studio_broadcast.hpp', 'studio_broadcast.cpp', 'studio_render_size.hpp', 'studio_background.hpp', 'studio_parameters.hpp', 'studio_parameter_socket.hpp', 'studio_ui_layout.hpp', 'studio_ui.hpp', 'studio_ui.cpp', 'studio_ui_theme.hpp', 'studio_ui_preferences.hpp', 'studio_physics_settings.hpp', 'studio_physics.hpp', 'studio_animations.hpp', 'studio_items.hpp', 'studio_item_attachment.hpp', 'studio_items_image.cpp', 'studio_items_vk.hpp', 'studio_items_vk.cpp', 'studio_app_icon.hpp', 'studio_app_icon.cpp'):
         shutil.copyfile(native / name, src / name)
     print('[studio] SDK hooks applied')
 

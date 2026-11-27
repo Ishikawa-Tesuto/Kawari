@@ -48,7 +48,7 @@ inline void apply_theme() {
     ImGui::StyleColorsDark();
     auto& s=ImGui::GetStyle();
     s.WindowRounding=s.FrameRounding=s.ChildRounding=s.PopupRounding=s.ScrollbarRounding=s.GrabRounding=s.TabRounding=0.f;
-    s.WindowPadding=ImVec2(12,12); s.FramePadding=ImVec2(8,4);
+    s.WindowPadding=ImVec2(12,12); s.FramePadding=ImVec2(8,5);
     s.ItemSpacing=ImVec2(6,4); s.ItemInnerSpacing=ImVec2(6,4);
     s.WindowBorderSize=s.ChildBorderSize=s.PopupBorderSize=s.FrameBorderSize=1.f;
     s.ScrollbarSize=10.f; s.GrabMinSize=8.f; s.IndentSpacing=16.f;
@@ -66,7 +66,7 @@ inline void apply_theme() {
     c[ImGuiCol_Tab]=raised; c[ImGuiCol_TabHovered]=hover; c[ImGuiCol_TabSelected]=active;
     c[ImGuiCol_TabDimmed]=surface; c[ImGuiCol_TabDimmedSelected]=hover;
     c[ImGuiCol_TabSelectedOverline]=accent; c[ImGuiCol_TabDimmedSelectedOverline]=muted;
-    c[ImGuiCol_Header]=raised; c[ImGuiCol_HeaderHovered]=hover; c[ImGuiCol_HeaderActive]=active;
+    c[ImGuiCol_Header]=active; c[ImGuiCol_HeaderHovered]=hover; c[ImGuiCol_HeaderActive]=active;
     c[ImGuiCol_CheckMark]=accent; c[ImGuiCol_SliderGrab]=accent; c[ImGuiCol_SliderGrabActive]=color(0xc6c2e2);
     c[ImGuiCol_Separator]=border; c[ImGuiCol_SeparatorHovered]=accent; c[ImGuiCol_SeparatorActive]=accent;
     c[ImGuiCol_ScrollbarBg]=base; c[ImGuiCol_ScrollbarGrab]=border; c[ImGuiCol_ScrollbarGrabHovered]=muted; c[ImGuiCol_ScrollbarGrabActive]=accent;
@@ -99,6 +99,65 @@ inline bool tool_button(const char* title,bool selected,ImVec2 size=ImVec2(0,0))
     const bool clicked=ImGui::Button(title,size);
     if(selected)ImGui::PopStyleColor();
     return clicked;
+}
+// Keep actions on one line when their full labels fit at the current UI scale.
+inline bool fits_after_item(float width){
+    const float right=ImGui::GetCursorScreenPos().x+ImGui::GetContentRegionAvail().x;
+    return ImGui::GetItemRectMax().x+ImGui::GetStyle().ItemSpacing.x+width<=right;
+}
+inline void next_action(const char* label){
+    const float width=ImGui::CalcTextSize(label,nullptr,true).x+2.f*ImGui::GetStyle().FramePadding.x;
+    if(fits_after_item(width))ImGui::SameLine();
+}
+inline void toolbar_status(const char* text){
+    if(fits_after_item(ImGui::CalcTextSize(text).x)){
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s",text);
+    }
+}
+inline bool primary_button(const char* label){
+    ImGui::PushStyleColor(ImGuiCol_Button,color(0x535174));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,color(0x625d8a));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,color(0x494567));
+    const bool pressed=ImGui::Button(label);
+    ImGui::PopStyleColor(3);
+    return pressed;
+}
+inline void field_label(const char* text){
+    ImGui::TextWrapped("%s",text);
+    ImGui::SetNextItemWidth(-1);
+}
+inline bool choice_row(const char* name,const char* detail,bool selected,const char* tooltip=nullptr){
+    const auto& style=ImGui::GetStyle();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,ImVec2(style.ItemSpacing.x,2.f*scale()));
+    const bool pressed=ImGui::Selectable("##choice",selected,ImGuiSelectableFlags_NoAutoClosePopups,
+                                        ImVec2(0,std::max(ImGui::GetFrameHeight(),28.f*scale())));
+    ImGui::PopStyleVar();
+    if(!ImGui::IsItemVisible())return pressed;
+    const auto a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax();
+    const float left=a.x+8.f*scale(),right=b.x-8.f*scale();
+    const float y=(a.y+b.y-ImGui::GetTextLineHeight())*.5f;
+    const float detail_width=ImGui::CalcTextSize(detail).x;
+    const float detail_area=std::min(detail_width,std::max(0.f,(right-left)*.42f));
+    const float name_end=detail_area>0?right-detail_area-8.f*scale():right;
+    auto* draw=ImGui::GetWindowDrawList();
+    draw->PushClipRect(ImVec2(left,a.y),ImVec2(std::max(left,name_end),b.y),true);
+    draw->AddText(ImVec2(left,y),ImGui::GetColorU32(ImGuiCol_Text),name);
+    draw->PopClipRect();
+    if(detail_area>0){
+        draw->PushClipRect(ImVec2(right-detail_area,a.y),ImVec2(right,b.y),true);
+        draw->AddText(ImVec2(right-detail_area,y),ImGui::GetColorU32(selected?ImGuiCol_Text:ImGuiCol_TextDisabled),detail);
+        draw->PopClipRect();
+    }
+    if((tooltip||ImGui::CalcTextSize(name).x>name_end-left||detail_width>detail_area)&&ImGui::BeginItemTooltip()){
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+std::min(420.f*scale(),ImGui::GetIO().DisplaySize.x*.8f));
+        ImGui::TextWrapped("%s",tooltip?tooltip:name);
+        if(!tooltip&&*detail)ImGui::TextWrapped("%s",detail);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+    return pressed;
 }
 // Small vector glyphs: no icon font, texture or network dependency.
 inline void navigation_icon(int icon,bool attention=false){

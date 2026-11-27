@@ -26,9 +26,82 @@ int main(int argc,char** argv){
             (p/'test.cpp').write_text(source)
             subprocess.run(['c++','-std=c++11','-Wall','-Wextra','-Werror','-I',str(ROOT/'native'),str(p/'test.cpp'),str(ROOT/'native/studio_items_image.cpp'),'-lpng','-lgif','-o',str(p/'test')],check=True)
             subprocess.run([str(p/'test'),d],check=True)
+    def test_artmesh_geometry_and_migration(self):
+        source=r'''
+#include "studio_items.hpp"
+#include <cassert>
+using namespace studio::items;
+
+int main(){
+    const Triangle base={{{0,0},{2,0},{0,1}}};
+    Anchor anchor;
+    float distance=0;
+    assert(bind_triangle(base,{.4f,.3f},true,anchor,distance)&&distance==0);
+    AttachmentFrame original;
+    assert(attachment_frame(base,anchor,original));
+    auto near=[](float actual,float expected){assert(std::abs(actual-expected)<.0001f);};
+    near(original.origin.x,.4f);near(original.origin.y,.3f);
+
+    Item item;
+    item.path="/assets/asset-aB12cD/帽子.png";
+    item.mesh={"/models/My Model.model3.json","ArtMesh_Hair",anchor};
+    const Pose visible={.4f,.1f,.35f,20};
+    fit_mesh(item,visible,original,2);
+    auto same=mesh_pose(item,original,2);
+    near(same.x,visible.x);near(same.y,visible.y);near(same.size,visible.size);near(same.angle,visible.angle);
+
+    const Triangle rotated={{{1,2},{1,6},{-1,2}}};
+    AttachmentFrame after;
+    assert(attachment_frame(rotated,anchor,after));
+    auto moved=mesh_pose(item,after,2);
+    near(moved.x,(1-2*visible.y)/2);near(moved.y,2+4*visible.x);
+    near(moved.size,visible.size*2);near(std::remainder(moved.angle,360.f),-70);
+    const auto offset=after.inverse({.5f,-.25f});
+    const Point delta=after.offset(offset);
+    near(delta.x,.5f);near(delta.y,-.25f);
+
+    const Triangle stretched={{{0,0},{2,0},{.4f,1.5f}}};
+    assert(attachment_frame(stretched,anchor,after));
+    near(after.origin.x,.52f);near(after.origin.y,.45f);
+    Anchor outside;
+    assert(!bind_triangle(base,{-.3f,.5f},true,outside,distance));
+    assert(bind_triangle(base,{-.3f,.5f},false,outside,distance));
+    near(distance,.09f);
+    assert(attachment_frame(base,outside,after));
+    near(after.origin.x,0);near(after.origin.y,.5f);
+    const Triangle collapsed={{{0,0},{0,0},{0,0}}};
+    assert(!bind_triangle(collapsed,{0,0},false,outside,distance));
+    assert(!attachment_frame(collapsed,anchor,after));
+
+    const float m[]={2,0,0,0,0,3,0,0,0,0,1,0,1,-1,0,2};
+    Point projected;
+    assert(project_vertex(m,2,{.25f,.5f},projected));
+    near(projected.x,1.5f);near(projected.y,.25f);
+
+    Item old;old.path="/assets/root.png";old.attached=true;
+    std::vector<Item> decoded;
+    const std::string legacy=encode({old});
+    assert(legacy.find("kawari-items-1\n")==0&&decode(legacy,decoded)&&decoded[0].attached&&!decoded[0].mesh);
+    const std::string modern=encode({old,item});
+    assert(modern.find("kawari-items-2\n")==0&&decode(modern,decoded)&&decoded.size()==2);
+    assert(decoded[0].attached&&decoded[1].mesh.id=="ArtMesh_Hair"&&decoded[1].mesh.model==item.mesh.model);
+    assert(encode(decoded)==modern);
+    item.mesh.anchor.edge=3;
+    assert(!decode(encode({item}),decoded));
+    assert(encode(decoded)==modern);
+}
+'''
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);(p/'test.cpp').write_text(source)
+            subprocess.run(['c++','-std=c++11','-Wall','-Wextra','-Werror','-I',str(ROOT/'native'),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
+            subprocess.run([str(p/'test')],check=True)
+
     def test_stage_order(self):
         patch=(ROOT/'scripts/patch_sdk.py').read_text()
+        self.assertLess(patch.index('studio::items::begin_mesh_frame();'),patch.index('studio::items::render(target'))
         self.assertLess(patch.index('studio::items::render(target'),patch.index('studio::broadcast_frame(target'))
+        self.assertIn('studio::items::capture_mesh_frame(*_model, matrix.GetArray()',patch)
+        self.assertIn('studio::items::forget_mesh_model(_model)',patch)
         self.assertIn('studio::items::shutdown()',patch)
         for f in ['scripts/build.sh','scripts/source-id.sh','scripts/patch_sdk.py']:
             self.assertIn('studio_items_vk.cpp',(ROOT/f).read_text())

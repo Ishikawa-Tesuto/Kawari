@@ -1,5 +1,6 @@
 #pragma once
 #include "studio_parameters.hpp"
+#include "studio_item_attachment.hpp"
 #include <string>
 #include <vector>
 #include <cmath>
@@ -15,18 +16,81 @@
 #include <fcntl.h>
 #include <unistd.h>
 namespace studio { namespace items {
-struct Item { std::string path; float x=0,y=0,size=.35f,angle=0,opacity=1; bool visible=true,attached=false,behind=false,locked=false; };
+struct MeshBinding {
+    std::string model,id;
+    Anchor anchor;
+    explicit operator bool() const {return !id.empty();}
+};
+struct Item { std::string path; float x=0,y=0,size=.35f,angle=0,opacity=1; bool visible=true,attached=false,behind=false,locked=false; MeshBinding mesh; };
 inline std::string asset_id(const Item& i){auto last=i.path.find_last_of('/');if(last==std::string::npos||last==0)return {};auto prev=i.path.find_last_of('/',last-1);auto id=i.path.substr(prev==std::string::npos?0:prev+1,last-(prev==std::string::npos?0:prev+1));return parameters::item_id_ok(id)?id:std::string{};}
 inline Item effective(const Item& i,const parameters::Runtime& runtime,parameters::Clock::time_point now){Item out=i;auto id=asset_id(i);if(!id.empty()){float weight=runtime.item_visibility(id,i.visible,now);out.visible=weight>0.f;out.opacity=i.opacity*weight;}return out;}
-struct Pose {float x,y,size;};
-inline Pose pose(const Item& i,float zoom,float panx,float pany){return i.attached?Pose{i.x*zoom+panx,i.y*zoom+pany,i.size*zoom}:Pose{i.x,i.y,i.size};}
+struct Pose {float x,y,size,angle;};
+inline Pose pose(const Item& i,float zoom,float panx,float pany){return i.attached?Pose{i.x*zoom+panx,i.y*zoom+pany,i.size*zoom,i.angle}:Pose{i.x,i.y,i.size,i.angle};}
 inline void attach(Item& i,bool on,float z,float px,float py){if(i.attached==on||z<=0)return;auto p=pose(i,z,px,py);i.attached=on;i.x=on?(p.x-px)/z:p.x;i.y=on?(p.y-py)/z:p.y;i.size=on?p.size/z:p.size;}
-inline bool valid(const Item& i){return !i.path.empty()&&i.path[0]=='/'&&i.path.size()<4096&&i.path.find_first_of("\r\n\t")==std::string::npos&&i.path.find('\0')==std::string::npos&&std::isfinite(i.x)&&std::isfinite(i.y)&&std::abs(i.x)<=10000&&std::abs(i.y)<=10000&&std::isfinite(i.size)&&i.size>=.001f&&i.size<=10000&&std::isfinite(i.angle)&&std::abs(i.angle)<=360&&std::isfinite(i.opacity)&&i.opacity>=0&&i.opacity<=1;}
-inline std::string encode(const std::vector<Item>& v){std::ostringstream o;o.imbue(std::locale::classic());o<<"kawari-items-1\n"<<std::setprecision(9);for(auto& i:v)o<<i.x<<' '<<i.y<<' '<<i.size<<' '<<i.angle<<' '<<i.opacity<<' '<<i.visible<<' '<<i.attached<<' '<<i.behind<<' '<<i.locked<<'\t'<<i.path<<'\n';return o.str();}
-inline bool decode(const std::string& s,std::vector<Item>& v){if(s.size()>262144)return false;std::istringstream in(s);std::string l;if(!std::getline(in,l)||l!="kawari-items-1")return false;std::vector<Item> out;while(std::getline(in,l)){auto tab=l.find('\t');if(tab==std::string::npos||out.size()>=32)return false;Item i;std::istringstream a(l.substr(0,tab));a.imbue(std::locale::classic());std::string extra;if(!(a>>i.x>>i.y>>i.size>>i.angle>>i.opacity>>i.visible>>i.attached>>i.behind>>i.locked)||(a>>extra))return false;i.path=l.substr(tab+1);if(!valid(i))return false;out.push_back(i);}v=out;return true;}
+inline Pose mesh_pose(const Item& item,const AttachmentFrame& frame,float aspect){
+    const Point point=frame.origin+frame.offset({item.x,item.y});
+    return {point.x/aspect,point.y,item.size*frame.scale,item.angle-frame.rotation()};
+}
+inline void fit_mesh(Item& item,const Pose& visible,const AttachmentFrame& frame,float aspect){
+    const Point local=frame.inverse(Point(visible.x*aspect,visible.y)-frame.origin);
+    item.x=local.x;item.y=local.y;item.size=visible.size/frame.scale;
+    item.angle=std::remainder(visible.angle+frame.rotation(),360.f);
+}
+inline bool clean_field(const std::string& field,size_t limit){
+    return !field.empty()&&field.size()<limit&&field.find_first_of("\r\n\t")==std::string::npos&&field.find('\0')==std::string::npos;
+}
+inline bool valid(const Item& i){
+    return clean_field(i.path,4096)&&i.path[0]=='/'&&std::isfinite(i.x)&&std::isfinite(i.y)&&
+           std::abs(i.x)<=10000&&std::abs(i.y)<=10000&&i.size>=.001f&&i.size<=10000&&
+           std::isfinite(i.angle)&&std::abs(i.angle)<=360&&i.opacity>=0&&i.opacity<=1&&
+           (!i.mesh||(!i.attached&&clean_field(i.mesh.model,4096)&&i.mesh.model[0]=='/'&&
+                      clean_field(i.mesh.id,1024)&&i.mesh.anchor.valid()));
+}
+inline std::string encode(const std::vector<Item>& rows){
+    std::ostringstream out;out.imbue(std::locale::classic());
+    const bool has_mesh=std::any_of(rows.begin(),rows.end(),[](const Item& item){return bool(item.mesh);});
+    out<<(has_mesh?"kawari-items-2\n":"kawari-items-1\n")<<std::setprecision(9);
+    for(const auto& i:rows){
+        out<<i.x<<' '<<i.y<<' '<<i.size<<' '<<i.angle<<' '<<i.opacity<<' '<<i.visible<<' '<<i.attached
+           <<' '<<i.behind<<' '<<i.locked<<'\t'<<i.path;
+        if(i.mesh){
+            const auto& a=i.mesh.anchor;
+            out<<'\t'<<i.mesh.model<<'\t'<<i.mesh.id<<'\t'<<a.triangle<<' '<<a.edge<<' '<<a.u<<' '<<a.v<<' '<<a.length;
+        }
+        out<<'\n';
+    }
+    return out.str();
+}
+inline bool decode(const std::string& text,std::vector<Item>& rows){
+    if(text.size()>393216)return false;
+    std::istringstream input(text);std::string line;
+    if(!std::getline(input,line)||(line!="kawari-items-1"&&line!="kawari-items-2"))return false;
+    const bool supports_mesh=line=="kawari-items-2";
+    std::vector<Item> result;
+    while(std::getline(input,line)){
+        if(result.size()>=32)return false;
+        std::istringstream fields(line);std::string numbers,extra;
+        Item i;
+        if(!std::getline(fields,numbers,'\t')||!std::getline(fields,i.path,'\t'))return false;
+        std::istringstream values(numbers);values.imbue(std::locale::classic());
+        if(!(values>>i.x>>i.y>>i.size>>i.angle>>i.opacity>>i.visible>>i.attached>>i.behind>>i.locked)||(values>>extra))return false;
+        if(!fields.eof()){
+            std::string anchor;
+            if(!supports_mesh||!std::getline(fields,i.mesh.model,'\t')||!std::getline(fields,i.mesh.id,'\t')||
+               !std::getline(fields,anchor)||!i.mesh)return false;
+            std::istringstream geometry(anchor);geometry.imbue(std::locale::classic());
+            auto& a=i.mesh.anchor;
+            if(!(geometry>>a.triangle>>a.edge>>a.u>>a.v>>a.length)||(geometry>>extra))return false;
+        }
+        if(!valid(i))return false;
+        result.push_back(std::move(i));
+    }
+    rows=std::move(result);
+    return true;
+}
 inline std::string directory(){const char* x=getenv("XDG_DATA_HOME"),*h=getenv("HOME");return x&&*x?std::string(x)+"/kawari":h&&*h?std::string(h)+"/.local/share/kawari":"";}
 inline bool safe(const struct stat& s){return S_ISREG(s.st_mode)&&s.st_uid==getuid()&&s.st_nlink==1&&!(s.st_mode&0077);}
-inline bool read(const std::string& p,std::vector<Item>& v){int fd=open(p.c_str(),O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);if(fd<0)return errno==ENOENT;struct stat s{};if(fstat(fd,&s)||!safe(s)||s.st_size<0||s.st_size>262144){close(fd);return false;}std::string data;char b[4096];ssize_t n;do{n=::read(fd,b,sizeof(b));if(n>0)data.append(b,n);}while((n>0||(n<0&&errno==EINTR))&&data.size()<=262144);close(fd);return n==0&&decode(data,v);}
+inline bool read(const std::string& p,std::vector<Item>& v){int fd=open(p.c_str(),O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);if(fd<0)return errno==ENOENT;struct stat s{};if(fstat(fd,&s)||!safe(s)||s.st_size<0||s.st_size>393216){close(fd);return false;}std::string data;char b[4096];ssize_t n;do{n=::read(fd,b,sizeof(b));if(n>0)data.append(b,n);}while((n>0||(n<0&&errno==EINTR))&&data.size()<=393216);close(fd);return n==0&&decode(data,v);}
 inline bool save(const std::string& p,const std::vector<Item>& v){if(p.empty()||v.size()>32)return false;for(auto& i:v)if(!valid(i))return false;struct stat s{};int r=lstat(p.c_str(),&s);if((r==0&&!safe(s))||(r&&errno!=ENOENT))return false;auto data=encode(v);std::string tmp=p+".tmp-XXXXXX";std::vector<char> b(tmp.begin(),tmp.end());b.push_back(0);int fd=mkstemp(b.data());if(fd<0)return false;FILE* f=fdopen(fd,"wb");bool ok=false;if(f){ok=fwrite(data.data(),1,data.size(),f)==data.size();if(fflush(f)||fsync(fd))ok=false;if(fclose(f))ok=false;}else close(fd);if(ok)ok=rename(b.data(),p.c_str())==0;if(!ok)unlink(b.data());return ok;}
 struct Scene {std::vector<Item> rows;std::string error;bool loaded=false;void load(){if(loaded)return;loaded=true;auto d=directory();if(d.empty()||!read(d+"/items.conf",rows))error="Could not read items.conf";} bool persist(){auto d=directory();if(d.empty()||!save(d+"/items.conf",rows)){error="Could not save items.conf";return false;}error.clear();return true;}};
 inline Scene& scene(){static Scene s;s.load();return s;}

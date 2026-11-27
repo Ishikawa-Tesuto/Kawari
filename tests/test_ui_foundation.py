@@ -90,6 +90,27 @@ int main(){
     assert(open);
     studio::ui::preferences().scale=130; studio::ui::apply_theme();
     assert(std::abs(io.FontGlobalScale-1.3f)<.01f && s.FrameBorderSize==1);
+    io.DisplaySize=ImVec2(360,620);
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0,0));ImGui::SetNextWindowSize(ImVec2(300,480));
+    ImGui::Begin("Narrow panel");
+    const float right=ImGui::GetCursorScreenPos().x+ImGui::GetContentRegionAvail().x;
+    studio::ui::primary_button("Activate");
+    const auto first=ImGui::GetItemRectMin();
+    studio::ui::next_action("Edit");ImGui::Button("Edit");
+    assert(ImGui::GetItemRectMin().y==first.y);
+    ImGui::Button("Import VTube Studio shortcuts");
+    const auto wide_button=ImGui::GetItemRectMin();
+    studio::ui::next_action("Delete expression");ImGui::Button("Delete expression");
+    assert(ImGui::GetItemRectMin().y>wide_button.y);
+    assert(ImGui::GetItemRectMax().x<=right);
+    studio::ui::field_label("Navigation language");
+    int language=0;
+    ImGui::Combo("##language",&language,"English\0Русский\0");
+    assert(ImGui::GetItemRectMax().x<=right);
+    studio::ui::choice_row("A long expression name that extends beyond the list width", "Ctrl + Alt + S",true);
+    assert(ImGui::GetItemRectSize().y>=28*studio::ui::scale());
+    ImGui::End();ImGui::Render();
     ImGui::DestroyContext();
 }
 '''
