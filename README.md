@@ -3,11 +3,9 @@
 </p>
 <h1 align="center">Kawari</h1>
 
-Kawari is a native Linux app for Live2D avatars and livestreaming. Load a Live2D model, configure tracking and expressions, add props to your scene, and send video with a transparent background to OBS over PipeWire.
+Kawari is a native Linux app for Live2D avatars and livestreaming. Load a Live2D model, configure tracking and expressions, add props to your scene, and send video with a transparent background to OBS over PipeWire. Kawari uses libfunnel, the same PipeWire video library used by [Spout2PW](https://spout2pw.lina.yt/).
 
 VTube Studio inspired me to start Kawari. Since it had no native Linux version, I set out to build a native app with the tools I wanted for my own streams. I hope it makes streaming on Linux a little easier for you, too.
-
-**P0.5h3 · Prototype · Linux x86-64**
 
 [Install](#install-on-arch-linux) · [Build](#build-on-arch-linux) · [Launch](#first-launch) · [OBS](#stream-to-obs) · [Integrations](#integrations)
 
@@ -20,7 +18,7 @@ VTube Studio inspired me to start Kawari. Since it had no native Linux version, 
 | **Scene items** | Import PNGs and GIFs, layer them in front of or behind the model, and adjust their size, rotation, and opacity. |
 | **Item attachments** | Attach items to the model root or choose a Live2D ArtMesh by ID or directly in the preview. Items keep their placement when attached and can be repositioned. ArtMesh attachments follow the mesh’s movement, rotation, and scale and are saved per model. |
 | **Workspace** | Dock panels on the right or open them as floating windows. Docked panels overlay the preview while the model keeps its position and scale. |
-| **Video output** | Send video with an alpha channel over PipeWire using DMA-BUF. Set the stream resolution independently of the window size. |
+| **Video output** | Send video with an alpha channel over PipeWire using DMA-BUF. Set the stream resolution independently of the window size. Capture the stream in OBS with OBS-PWVideo, the same plugin used with Spout2PW. |
 | **Integrations** | Connect VBridger and other clients through Kawari's partial implementation of the VTube Studio Public API. Bind Twitch Channel Points rewards to expressions. |
 
 ## Install on Arch Linux
