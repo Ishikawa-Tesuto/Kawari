@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -33,6 +34,11 @@ constexpr auto Event="channel.channel_points_custom_reward_redemption.add";
 constexpr auto OAuth="https://id.twitch.tv/oauth2/";
 constexpr auto Helix="https://api.twitch.tv/helix/";
 constexpr auto EventWS="wss://eventsub.wss.twitch.tv/ws";
+constexpr auto RefreshAge=std::chrono::hours(24*25);
+constexpr auto RefreshCooldown=30s;
+std::chrono::seconds unix_time() {
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch());
+}
 struct J {
     std::shared_ptr<json_object> p;
     explicit J(json_object* o=nullptr):p(o,[](json_object* x){if(x)json_object_put(x);}){}
@@ -57,7 +63,30 @@ struct Fd{int n;explicit Fd(int v):n(v){}~Fd(){if(n>=0)close(n);}Fd(const Fd&)=d
 void private_dir(const fs::path& p){struct stat st{};if(lstat(p.c_str(),&st)||!S_ISDIR(st.st_mode)||st.st_uid!=getuid()||(st.st_mode&077))throw std::runtime_error("Expected private Twitch directory (0700)");}
 S read_private(const fs::path& p){Fd f(open(p.c_str(),O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC));if(f.n<0){if(errno==ENOENT)return {};throw std::runtime_error("Cannot read private file");}struct stat st{};if(fstat(f.n,&st)||!S_ISREG(st.st_mode)||st.st_uid!=getuid()||(st.st_mode&077)||st.st_size>long(Limit))throw std::runtime_error("Expected private file (0600)");S s;char b[4096];for(;;){auto n=read(f.n,b,sizeof(b));if(n<0&&errno==EINTR)continue;if(n<0||s.size()+size_t(n)>Limit)throw std::runtime_error("Cannot read private file");if(!n)break;s.append(b,n);}return s;}
 J load(const fs::path& p){auto s=read_private(p);if(s.empty()){if(fs::exists(p))throw std::runtime_error("Empty private JSON file");return J::obj();}auto j=J::parse(s);if(!j.object())throw std::runtime_error("Invalid private JSON file");return j;}
-void atomic(const fs::path& p,const S& s){if(s.size()>Limit)throw std::runtime_error("File size limit");S tmp=(p.parent_path()/".twitch-XXXXXX").string();Fd f(mkstemp(tmp.data()));if(f.n<0)throw std::runtime_error("Cannot create private file");try{size_t off=0;while(off<s.size()){auto n=write(f.n,s.data()+off,s.size()-off);if(n<0&&errno==EINTR)continue;if(n<=0)throw std::runtime_error("Cannot write private file");off+=n;}if(fsync(f.n)||rename(tmp.c_str(),p.c_str()))throw std::runtime_error("Cannot publish private file");}catch(...){unlink(tmp.c_str());throw;}}
+void atomic(const fs::path& p,const S& s,bool durable=false) {
+    if (s.size()>Limit) throw std::runtime_error("File size limit");
+    S tmp=(p.parent_path()/".twitch-XXXXXX").string();
+    Fd f(mkstemp(tmp.data()));
+    if (f.n<0) throw std::runtime_error("Cannot create private file");
+    try {
+        size_t off=0;
+        while (off<s.size()) {
+            auto n=write(f.n,s.data()+off,s.size()-off);
+            if (n<0&&errno==EINTR) continue;
+            if (n<=0) throw std::runtime_error("Cannot write private file");
+            off+=n;
+        }
+        if (fsync(f.n)||rename(tmp.c_str(),p.c_str())) throw std::runtime_error("Cannot publish private file");
+    } catch (...) {
+        unlink(tmp.c_str());
+        throw;
+    }
+    if (durable) {
+        Fd dir(open(p.parent_path().c_str(),O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC));
+        if (dir.n<0||(fsync(dir.n)&&errno!=EINVAL&&errno!=EOPNOTSUPP))
+            throw std::runtime_error("Cannot sync private file directory");
+    }
+}
 bool safe_field(const S& s){return !s.empty()&&s.size()<=4096&&std::none_of(s.begin(),s.end(),[](unsigned char c){return c<32||c==127;});}
 S display(S s){for(char& c:s)if(static_cast<unsigned char>(c)<32||c==127)c=' ';return s.substr(0,4096);}
 bool client_id(const S& s){return s.size()>=10&&s.size()<=128&&std::all_of(s.begin(),s.end(),[](unsigned char c){return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9');});}
@@ -73,6 +102,11 @@ S form(std::initializer_list<std::pair<S,S>> args){S r;for(auto& [k,v]:args){if(
 size_t append(char* p,size_t a,size_t b,void* user){auto& s=*static_cast<S*>(user);if(a&&b>Limit/a)return 0;auto n=a*b;if(n>Limit-s.size())return 0;s.append(p,n);return n;}
 struct TransportError:std::runtime_error{using std::runtime_error::runtime_error;};
 struct LoginRequired:std::runtime_error{using std::runtime_error::runtime_error;};
+struct RetryAuthentication:std::runtime_error {
+    std::chrono::seconds delay;
+    explicit RetryAuthentication(const S& message, std::chrono::seconds retry=RefreshCooldown)
+        :std::runtime_error(message),delay(retry){}
+};
 struct HttpError:std::runtime_error {
     long status;
     S reason;
@@ -80,6 +114,13 @@ struct HttpError:std::runtime_error {
     HttpError(long s,S r,std::chrono::seconds delay=0s)
         :std::runtime_error("Twitch HTTP "+std::to_string(s)),status(s),reason(std::move(r)),retry_after(delay){}
     bool temporary() const {return status==408||status==429||status>=500;}
+    bool rejects_refresh_token() const {
+        if (status!=400&&status!=401) return false;
+        auto text=reason;
+        std::transform(text.begin(),text.end(),text.begin(),[](unsigned char c){return char(std::tolower(c));});
+        return text=="invalid_grant" || (text.find("refresh token")!=S::npos &&
+            (text.find("invalid")!=S::npos||text.find("expired")!=S::npos||text.find("revoked")!=S::npos));
+    }
 };
 std::chrono::seconds retry_delay(CURL* curl) {
     for (const char* name : {"Retry-After", "Ratelimit-Reset"}) {
@@ -121,7 +162,11 @@ J http(const S& url, const S& body, const std::vector<S>& headers) {
     curl_easy_getinfo(c.get(), CURLINFO_RESPONSE_CODE, &status);
     if (status < 200 || status >= 300) {
         S reason;
-        try { reason = J::parse(out).text("message"); } catch (const std::exception&) {}
+        try {
+            auto error=J::parse(out);
+            reason=error.text("message");
+            if (reason.empty()) reason=error.text("error");
+        } catch (const std::exception&) {}
         throw HttpError(status, reason, status == 429 ? retry_delay(c.get()) : 0s);
     }
     return out.empty() ? J::obj() : J::parse(out);
@@ -228,8 +273,11 @@ struct Service {
     S handoff_url, published;
     Clock::time_point retry{}, validate_at{}, rewards_at{}, model_at{}, local_at{}, device_at{}, device_end{}, last_event{};
     Clock::time_point handoff_deadline{}, handoff_at{}, welcome_deadline{};
+    Clock::time_point refresh_after{};
+    std::chrono::seconds refresh_issued{};
     std::chrono::seconds interval=5s, keepalive=35s, backoff=2s;
     bool enabled=false, requesting_code=false, approval_blocked=false, save_enable_pending=false;
+    bool token_dirty=false, refresh_rejected=false;
     pid_t browser=-1;
 
     Service(fs::path m, fs::path r, unsigned p, Request request=http,
@@ -237,7 +285,20 @@ struct Service {
         :mail(std::move(m)),root(std::move(r)),port(p),remote(std::move(request)),open_event(std::move(open)) {
         bindings=load(root/"bindings.json");
         auto preferences=load(root/"native-enabled.json");
-        try { token=load(root/"oauth.json"); }
+        try {
+            const auto file=root/"oauth.json";
+            token=load(file);
+            const auto now=unix_time();
+            const auto issued=token.get("refresh_issued_at").number();
+            if (issued>=1.&&issued<=double(now.count())) {
+                refresh_issued=std::chrono::seconds(static_cast<long long>(issued));
+            } else if (!token.text("refresh_token").empty()) {
+                // Older versions wrote the file only when a new pair was saved.
+                struct stat info{};
+                if (!lstat(file.c_str(),&info)&&S_ISREG(info.st_mode)&&info.st_mtime>0)
+                    refresh_issued=std::min(now,std::chrono::seconds(info.st_mtime));
+            }
+        }
         catch (const std::exception&) { note="Saved Twitch login could not be read. Connect to sign in again."; }
         client=preferences.text("client_id");
         if (!client_id(client)) client=token.text("client_id");
@@ -251,7 +312,8 @@ struct Service {
     }
 
     bool has_login() const {
-        return client_id(client)&&token.text("client_id")==client&&safe_field(token.text("access_token"));
+        return client_id(client)&&token.text("client_id")==client&&
+            (safe_field(token.text("access_token"))||safe_field(token.text("refresh_token")));
     }
     void publish() {
         S s="kawari-twitch-1\n";
@@ -263,7 +325,8 @@ struct Service {
         auto remaining=[](Clock::time_point until){
             return std::to_string(std::max(0s,std::chrono::ceil<std::chrono::seconds>(until-Clock::now())).count());
         };
-        row({"S",status,note});
+        row({"S",status,note.empty()&&refresh_rejected
+            ?"Twitch could not renew this login. Sign-in will be required when it expires.":note});
         row({"C",client,login,enabled?"1":"0"});
         row({"D",code,url});
         row({"T",device_code.empty()?"":remaining(device_end),status=="Reconnecting"?remaining(retry):""});
@@ -298,61 +361,79 @@ struct Service {
     void save_token(J t) {
         if (!safe_field(t.text("access_token")) || !safe_field(t.text("refresh_token")))
             throw std::runtime_error("Invalid OAuth token response");
+        refresh_issued=unix_time();
         t.set("client_id",client);
+        t.set("refresh_issued_at",J::num(refresh_issued.count()));
         // Twitch rotates device-flow refresh tokens. Keep the new token in memory even
         // if the first disk write fails, then retry that write before another refresh.
         token=std::move(t);
         token_dirty=true;
+        refresh_rejected=false;
         persist_token();
     }
-    bool token_dirty=false;
     void persist_token() {
         if (!token_dirty) return;
-        atomic(root/"oauth.json",token.dump());
+        try {atomic(root/"oauth.json",token.dump(),true);}
+        catch (const std::exception&) {throw RetryAuthentication("Could not save the Twitch login. Retrying.");}
         token_dirty=false;
     }
     void refresh() {
         persist_token();
         auto refresh_token=token.text("refresh_token");
-        if (!safe_field(refresh_token)) throw LoginRequired("Your Twitch login expired. Click Connect to sign in.");
+        if (refresh_rejected||!safe_field(refresh_token))
+            throw LoginRequired("Your Twitch login expired or was revoked. Click Connect to sign in.");
+        const auto now=Clock::now();
+        if (now<refresh_after)
+            throw RetryAuthentication("Waiting to retry Twitch authorization.",std::chrono::ceil<std::chrono::seconds>(refresh_after-now));
+        refresh_after=now+RefreshCooldown;
         try {
             save_token(oauth("token",form({{"client_id",client},{"grant_type","refresh_token"},{"refresh_token",refresh_token}})));
         } catch (const HttpError& e) {
-            if (e.status==400||e.status==401)
+            if (e.rejects_refresh_token()) {
+                refresh_rejected=true;
                 throw LoginRequired("Your Twitch login expired or was revoked. Click Connect to sign in.");
+            }
+            const auto delay=std::max(RefreshCooldown,e.retry_after);
+            refresh_after=Clock::now()+delay;
+            throw RetryAuthentication(S(e.what())+" while renewing Twitch authorization. Retrying.",delay);
+        } catch (const RetryAuthentication&) {
+            refresh_after=Clock::now()+RefreshCooldown;
+            throw;
+        } catch (const std::exception&) {
+            refresh_after=Clock::now()+RefreshCooldown;
+            throw RetryAuthentication("Twitch login renewal did not complete. Retrying.");
+        }
+        refresh_after=Clock::now()+RefreshCooldown;
+    }
+    template<class Send>
+    J authenticated(Send send) {
+        const bool needs_refresh=!safe_field(token.text("access_token"));
+        if (needs_refresh) refresh();
+        try {return send();}
+        catch (const HttpError& e) {
+            if (e.status!=401) throw;
+            if (needs_refresh) throw RetryAuthentication("Twitch did not accept the renewed token yet. Retrying.");
+        }
+        refresh();
+        try {return send();}
+        catch (const HttpError& e) {
+            if (e.status==401) throw RetryAuthentication("Twitch did not accept the renewed token yet. Retrying.");
             throw;
         }
     }
     J helix(const S& endpoint,const J& data=J()) {
-        auto send=[&](){
+        return authenticated([&](){
             std::vector<S> headers={"Authorization: Bearer "+token.text("access_token"),"Client-Id: "+client};
-            if(data.p)headers.push_back("Content-Type: application/json");
+            if (data.p) headers.push_back("Content-Type: application/json");
             return remote(S(Helix)+endpoint,data.p?data.dump():S(),headers);
-        };
-        try {return send();}
-        catch (const HttpError& e) {if(e.status!=401)throw;}
-        refresh();
-        try {return send();}
-        catch (const HttpError& e) {
-            if(e.status==401)throw LoginRequired("Twitch refused the refreshed login. Click Connect to sign in.");
-            throw;
-        }
+        });
     }
     void validate() {
         if (!has_login()) throw LoginRequired("Click Connect to sign in to Twitch.");
         persist_token();
-        auto check=[&](){return remote(S(OAuth)+"validate",{},{"Authorization: OAuth "+token.text("access_token")});};
-        J v;
-        try {v=check();}
-        catch (const HttpError& e) {
-            if (e.status!=401) throw;
-            refresh();
-            try {v=check();}
-            catch (const HttpError& second) {
-                if (second.status==401) throw LoginRequired("Twitch refused the refreshed login. Click Connect to sign in.");
-                throw;
-            }
-        }
+        auto v=authenticated([&](){
+            return remote(S(OAuth)+"validate",{},{"Authorization: OAuth "+token.text("access_token")});
+        });
         bool scope=false;
         for (auto& field:v.get("scopes").array()) scope|=field.text()==Scope;
         if (!scope||v.text("client_id")!=client||!safe_field(v.text("user_id")))
@@ -363,6 +444,18 @@ struct Service {
         login=v.text("login");
         auto expires=v.get("expires_in").number(1800);
         validate_at=Clock::now()+std::chrono::seconds(int(std::isfinite(expires)?std::clamp(expires,5.,1800.):1800.));
+        // Keep an active device grant current even if its access token is still valid.
+        if (!refresh_rejected&&refresh_issued>0s&&unix_time()-refresh_issued>=RefreshAge) {
+            try {
+                refresh();
+                validate_at=std::min(validate_at,Clock::now()+RefreshCooldown);
+            } catch (const LoginRequired&) {
+                refresh_rejected=true;
+            } catch (const RetryAuthentication& error) {
+                validate_at=std::min(validate_at,Clock::now()+error.delay);
+                note=error.what();
+            }
+        }
     }
     void refresh_rewards() {
         rewards=helix("channel_points/custom_rewards?broadcaster_id="+escape(channel)).get("data");
@@ -590,6 +683,7 @@ struct Service {
         status="Connecting";
         note.clear();
         save_enable_pending=true;
+        refresh_after={};
         save_token(std::move(credentials));
         preference(true);
         save_enable_pending=false;
@@ -631,6 +725,9 @@ struct Service {
         fs::remove(root/"oauth.json",error);
         token=J::obj();
         token_dirty=false;
+        refresh_rejected=false;
+        refresh_issued={};
+        refresh_after={};
         return !error;
     }
     void sign_in_required(const S& reason) {
@@ -741,6 +838,10 @@ struct Service {
         if (Clock::now()>=validate_at) {
             try {validate();}
             catch (const LoginRequired&) {throw;}
+            catch (const RetryAuthentication& e) {
+                validate_at=Clock::now()+e.delay;
+                note=e.what();
+            }
             catch (const HttpError& e) {
                 if (!e.temporary()) throw;
                 validate_at=Clock::now()+std::max(15s,e.retry_after);
@@ -753,6 +854,10 @@ struct Service {
         if (Clock::now()>=rewards_at) {
             try {refresh_rewards();rewards_at=Clock::now()+5min;}
             catch (const LoginRequired&) {throw;}
+            catch (const RetryAuthentication& e) {
+                rewards_at=Clock::now()+e.delay;
+                note=e.what();
+            }
             catch (const HttpError& e) {
                 rewards_at=Clock::now()+std::max(60s,e.retry_after);
                 note=e.status==403?"Twitch did not grant access to this channel's rewards.":"Could not refresh Channel Points rewards.";
@@ -779,6 +884,8 @@ struct Service {
             update_remote();
         } catch (const LoginRequired& e) {
             sign_in_required(e.what());
+        } catch (const RetryAuthentication& e) {
+            begin_retry(e.what(),e.delay);
         } catch (const HttpError& e) {
             if (!e.temporary()) {
                 const bool sign_in=requesting_code;

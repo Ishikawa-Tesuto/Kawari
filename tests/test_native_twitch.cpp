@@ -63,6 +63,102 @@ void test_device_login(const fs::path& root, unsigned port) {
     assert(!unavailable.enabled&&!unavailable.requesting_code);
 }
 
+void test_saved_login_renewal(const fs::path& root, unsigned port) {
+    fs::create_directory(root);
+    const auto file=root/"oauth.json";
+    atomic(file,R"({"client_id":"client123456789","access_token":"old-access","refresh_token":"old-refresh"})");
+    atomic(root/"native-enabled.json",R"({"enabled":true,"client_id":"client123456789"})");
+    const auto old=unix_time()-RefreshAge-24h;
+    const timespec times[]={{old.count(),0},{old.count(),0}};
+    assert(utimensat(AT_FDCWD,file.c_str(),times,0)==0);
+    int rotations=0;
+    auto request=[&](const S& url,const S& body,const std::vector<S>& headers) -> J {
+        if (url==S(OAuth)+"token") {
+            ++rotations;
+            assert(body.find("refresh_token=old-refresh")!=S::npos);
+            return J::parse(R"({"access_token":"new-access","refresh_token":"new-refresh"})");
+        }
+        assert(url==S(OAuth)+"validate");
+        assert(headers.front()==(rotations==0?"Authorization: OAuth old-access":"Authorization: OAuth new-access"));
+        return J::parse(R"({"client_id":"client123456789","user_id":"123","login":"sample","scopes":["channel:read:redemptions"],"expires_in":3600})");
+    };
+    Service first(root,root,port,request);
+    assert(first.enabled&&first.refresh_issued==old);
+    first.validate();
+    assert(rotations==1);
+    auto saved=load(file);
+    assert(saved.text("refresh_token")=="new-refresh");
+    assert(saved.get("refresh_issued_at").number()>=double((unix_time()-5s).count()));
+    Service restarted(root,root,port,request);
+    assert(restarted.enabled&&restarted.has_login());
+    restarted.validate();
+    assert(rotations==1&&restarted.login=="sample");
+}
+
+void test_refresh_failures_preserve_login(const fs::path& root, unsigned port) {
+    fs::create_directory(root);
+    const auto file=root/"oauth.json";
+    int rotations=0;
+    long result=200;
+    auto request=[&](const S& url,const S& body,const std::vector<S>&) -> J {
+        if (url!=S(OAuth)+"token") throw HttpError(401,"access token rejected");
+        ++rotations;
+        if (result==429) throw HttpError(429,"temporarily rate limited",90s);
+        if (result==400) throw HttpError(400,"Invalid Client ID");
+        if (result==401) throw HttpError(401,"Invalid refresh token");
+        assert(body.find("refresh_token=old-refresh")!=S::npos);
+        return J::parse(R"({"access_token":"rotated-access","refresh_token":"rotated-refresh"})");
+    };
+    Service s(root,root,port,request);
+    s.client="client123456789";
+    s.save_token(J::parse(R"({"access_token":"old-access","refresh_token":"old-refresh"})"));
+    s.preference(true);
+    s.tick(); // Both validation attempts return 401, even after a successful rotation.
+    assert(s.enabled&&s.status=="Reconnecting"&&rotations==1);
+    assert(load(file).text("refresh_token")=="rotated-refresh");
+    try {s.helix("test");assert(false);} catch (const RetryAuthentication&) {}
+    assert(rotations==1); // Shared backoff protects the new one-time refresh token.
+
+    s.retry={};s.refresh_after={};result=429;
+    s.tick();
+    assert(s.enabled&&rotations==2&&s.refresh_after>Clock::now()+89s);
+    try {s.helix("test");assert(false);} catch (const RetryAuthentication&) {}
+    assert(rotations==2&&load(file).text("refresh_token")=="rotated-refresh");
+
+    s.retry={};s.refresh_after={};result=400;
+    s.tick();
+    assert(s.enabled&&rotations==3&&fs::exists(file));
+
+    s.retry={};s.refresh_after={};result=401;
+    s.tick();
+    assert(!s.enabled&&s.status=="Sign-in required"&&rotations==4&&!fs::exists(file));
+}
+
+void test_refresh_survives_storage_error(const fs::path& root, unsigned port) {
+    fs::create_directory(root);
+    const auto file=root/"oauth.json";
+    const auto previous=root/"previous.json";
+    int rotations=0;
+    Service s(root,root,port,[&](const S& url,const S& body,const std::vector<S>&) {
+        assert(url==S(OAuth)+"token"&&body.find("refresh_token=old-refresh")!=S::npos);
+        ++rotations;
+        return J::parse(R"({"access_token":"new-access","refresh_token":"new-refresh"})");
+    });
+    s.client="client123456789";
+    s.save_token(J::parse(R"({"access_token":"old-access","refresh_token":"old-refresh"})"));
+    s.preference(true);
+    fs::rename(file,previous);
+    fs::create_directory(file);
+    try {s.refresh();assert(false);} catch (const RetryAuthentication&) {}
+    assert(rotations==1&&s.token_dirty);
+    fs::remove(file);
+    fs::rename(previous,file);
+    try {s.refresh();assert(false);} catch (const RetryAuthentication&) {}
+    assert(rotations==1&&!s.token_dirty);
+    Service restarted(root,root,port);
+    assert(restarted.enabled&&restarted.token.text("refresh_token")=="new-refresh");
+}
+
 void test_event_handoff(const fs::path& root, unsigned port) {
     fs::create_directory(root);
     int opens=0, subscriptions=0;
@@ -106,6 +202,9 @@ int main(int argc,char** argv){
     assert(argc==3);
     auto root=fs::path(argv[1]);auto port=unsigned(std::stoul(argv[2]));
     test_device_login(root/"device",port);
+    test_saved_login_renewal(root/"saved-login",port);
+    test_refresh_failures_preserve_login(root/"refresh-errors",port);
+    test_refresh_survives_storage_error(root/"storage-error",port);
     auto j=J::parse(R"({"metadata":{"message_type":"notification"},"payload":{"subscription":{"type":"channel.channel_points_custom_reward_redemption.add"},"event":{"id":"first","broadcaster_user_id":"123","reward":{"id":"reward"}}}})");
     Dedup d;assert(d.take(j,"999").empty());assert(d.take(j,"123")=="reward");assert(d.take(j,"123").empty());
     assert(verify_url("https://www.twitch.tv/activate"));assert(!verify_url("https://www.twitch.tv.evil/activate"));assert(!reconnect_url("wss://eventsub.wss.twitch.tv@evil.com"));
