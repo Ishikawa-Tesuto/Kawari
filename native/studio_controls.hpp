@@ -18,7 +18,6 @@ void update_view(GLFWwindow* window);
 void apply_camera(float* projection);
 bool camera_is_default();
 float camera_scale();
-float camera_base_scale();
 void camera_offset(float& x,float& y);
 void camera_zoom(float factor);
 void camera_zoom_at(float factor,float x,float y);

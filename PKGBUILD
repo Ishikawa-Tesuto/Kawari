@@ -1,7 +1,7 @@
 # Local package recipe. Run makepkg from the Kawari source directory.
 pkgname=kawari
 pkgver=0.5h3
-pkgrel=9
+pkgrel=10
 pkgdesc='Live2D avatar and livestreaming app with PipeWire video output'
 arch=('x86_64')
 # makepkg's debug path remapping uses RUSTFLAGS, which Cargo splits on spaces.

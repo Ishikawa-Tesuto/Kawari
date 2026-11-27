@@ -624,7 +624,7 @@ impl Runtime {
             if position.is_some() || self.applied {
                 let packet = position
                     .map(|p| format!("expr on obs-position 0 0{}", p.packet()))
-                    .unwrap_or_else(|| "expr off obs-position".into());
+                    .unwrap_or_else(|| "expr hold obs-position".into());
                 if let Err(error) = bridge.send(&packet) {
                     if now >= self.next_ui {
                         eprintln!("[obs] {}", error.1);
@@ -733,6 +733,11 @@ mod tests {
         schedule.observe(second.clone(), |_| Some((delay, position(1))));
         assert_eq!(schedule.ready(changed + delay), None);
         schedule.observe(second, |_| None);
+        assert_eq!(schedule.ready(changed + delay), Some(None));
+
+        schedule.observe(first.clone(), |_| Some((delay, position(-1))));
+        schedule.observe(Some(("Unbound".into(), changed)), |_| None);
+        assert_eq!(schedule.ready(changed), Some(None));
         assert_eq!(schedule.ready(changed + delay), Some(None));
 
         schedule.observe(first, |_| Some((delay, position(-1))));

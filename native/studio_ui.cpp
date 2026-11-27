@@ -517,7 +517,7 @@ void expression_editor_draw(){
       long travel=0;
       if(const auto& p=d.detail.position){
         float x,y;camera_offset(x,y);
-        const float distance=parameters::view_distance({x,y,camera_scale()},p.target(camera_base_scale()));
+        const float distance=parameters::view_distance({x,y,camera_scale()},p.target(camera_scale()));
         travel=std::min(86399000L,std::lround(1000.f*distance/p.speed));
       }
       const auto hold=std::max(fi,travel)+1000;
@@ -1054,8 +1054,19 @@ void expressions_popup(const ImVec2& sz,GLFWwindow* window){
         size_t matches=0;
         for(const auto& r:expression_rows){if(r.hotkey||!ui_parameter_matches(r.name,expression_filter))continue;++matches;
           ImGui::PushID(r.key.c_str());bool active=r.active;
-          if(ImGui::Checkbox((r.name+"###expression-toggle").c_str(),&active))expression_request("toggle",r.key);
-          const auto detail=expression_details.find(r.key);if(detail!=expression_details.end()){ImGui::TextDisabled("Fade in %.2f s | Fade out %.2f s",detail->second.fade,detail->second.fade_out);ImGui::TextDisabled("%zu parameters | %zu items",detail->second.terms.size(),detail->second.items.size());}
+          const auto detail=expression_details.find(r.key);
+          const bool placement_only=detail!=expression_details.end()&&detail->second.position&&
+                                    detail->second.terms.empty()&&detail->second.items.empty();
+          if(placement_only){
+            if(ImGui::SmallButton("Move model"))expression_request("toggle",r.key);
+            ImGui::SameLine();ImGui::TextWrapped("%s",r.name.c_str());
+          }else{
+            if(ImGui::Checkbox((r.name+"###expression-toggle").c_str(),&active))expression_request("toggle",r.key);
+            if(detail!=expression_details.end()){
+              ImGui::TextDisabled("Fade in %.2f s | Fade out %.2f s",detail->second.fade,detail->second.fade_out);
+              ImGui::TextDisabled("%zu parameters | %zu items",detail->second.terms.size(),detail->second.items.size());
+            }
+          }
           ImGui::BeginDisabled(r.active||!expression_details.count(r.key));if(ImGui::SmallButton("Edit"))expression_editor_begin(&r);ImGui::EndDisabled();
           ImGui::SameLine();ImGui::BeginDisabled(!expression_details.count(r.key));if(ImGui::SmallButton("Duplicate"))expression_editor_begin(&r,true);ImGui::EndDisabled();
           auto& m=expression_management_ui;

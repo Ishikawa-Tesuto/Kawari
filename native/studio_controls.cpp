@@ -27,6 +27,8 @@ Clock::time_point frame_start;
 int selected = 0;
 float zoom = 1.f, pan_x = 0.f, pan_y = 0.f;
 parameters::PositionMotion position_motion;
+parameters::ModelView preview_origin;
+bool position_preview=false;
 float zoom_target = 1.f, anchor_x = 0.f, anchor_y = 0.f;
 Clock::time_point view_tick{};
 float limit_pan(float v){return parameters::clamp(v,-parameters::pan_limit,parameters::pan_limit);}
@@ -149,6 +151,21 @@ ModelSelection& active_selection(){
 bool initialized = false;
 parameters::Runtime parameter_runtime;
 parameters::Socket parameter_socket;
+
+void begin_manual_placement(){
+    parameter_runtime.take_position_request();
+    position_motion.active=false;
+    position_preview=false;
+}
+bool ingest_packet(const std::string& packet,Clock::time_point now){
+    if(packet=="expr hold obs-position"){
+        parameter_runtime.cancel_position_request(parameters::PositionSource::Obs);
+        if(position_motion.source==parameters::PositionSource::Obs)position_motion.active=false;
+        return true;
+    }
+    return parameter_runtime.ingest(packet,now);
+}
+
 Clock::time_point parameter_tick, snapshot_tick;
 unsigned invalid_packets=0;
 std::vector<float> editor_current;
@@ -198,26 +215,25 @@ int window_width(int fallback) { return dimension("STUDIO_WIDTH",fallback); }
 int window_height(int fallback) { return dimension("STUDIO_HEIGHT",fallback); }
 bool camera_is_default() {
     float x,y;camera_offset(x,y);
-    return camera_scale()==1.f && zoom_target==1.f && x==0.f && y==0.f;
+    return zoom==1.f && zoom_target==1.f && x==0.f && y==0.f;
 }
-float camera_scale() { return position_motion.scaling?position_motion.view.scale:zoom; }
-float camera_base_scale() { return zoom; }
-void camera_offset(float& x,float& y){
-    x=position_motion.active?position_motion.view.x:pan_x;
-    y=position_motion.active?position_motion.view.y:pan_y;
-}
+float camera_scale() { return zoom; }
+void camera_offset(float& x,float& y){x=pan_x;y=pan_y;}
 void camera_zoom(float factor) {
-    if(!std::isfinite(factor)||factor<=0)return;
+    if(!std::isfinite(factor)||factor<=0||factor==1.f)return;
+    begin_manual_placement();
     zoom=zoom_target=limit_zoom(zoom*factor);
     remember_model_view();
 }
 void camera_zoom_at(float factor,float x,float y) {
-    if (!std::isfinite(factor) || factor<=0 || !std::isfinite(x) || !std::isfinite(y)) return;
+    if (!std::isfinite(factor) || factor<=0 || factor==1.f || !std::isfinite(x) || !std::isfinite(y)) return;
+    begin_manual_placement();
     zoom_target=limit_zoom(zoom*factor);scale_about(zoom_target,x,y);
     remember_model_view();
 }
 void camera_scroll(float delta,float x,float y){
     if(!std::isfinite(delta)||delta==0||!std::isfinite(x)||!std::isfinite(y))return;
+    begin_manual_placement();
     // Fractional wheel/trackpad deltas accumulate in logarithmic scale.
     const float step=std::max(-64.f,std::min(64.f,delta));
     zoom_target=limit_zoom(zoom_target*std::pow(1.075f,step));
@@ -233,6 +249,7 @@ void camera_advance(float dt){
 }
 void camera_pan(float x,float y) {
     if(!std::isfinite(x)||!std::isfinite(y)||(x==0.f&&y==0.f))return;
+    begin_manual_placement();
     const float old_x=pan_x,old_y=pan_y;
     pan_x=limit_pan(pan_x+x);pan_y=limit_pan(pan_y+y);
     // A drag during a zoom translates its anchor as well.
@@ -240,6 +257,7 @@ void camera_pan(float x,float y) {
     remember_model_view();
 }
 void camera_reset(){
+    begin_manual_placement();
     zoom=zoom_target=1;pan_x=pan_y=anchor_x=anchor_y=0;view_tick={};
     remember_model_view();
 }
@@ -268,8 +286,23 @@ void update_view(GLFWwindow* w) {
     if(!view_profile.loaded)load_model_view(active_selection().view);
     const auto now=Clock::now();
     const float dt=view_tick==Clock::time_point{}?0.f:std::chrono::duration<float>(now-view_tick).count();
-    camera_advance(dt);
-    position_motion.advance(dt,{pan_x,pan_y,zoom},parameter_runtime.model_position(now));
+    using parameters::PositionSource;
+    const auto request=parameter_runtime.take_position_request();
+    if(request.position){
+        const bool preview=request.source==PositionSource::Preview;
+        if(preview&&!position_preview)preview_origin={pan_x,pan_y,zoom};
+        position_preview=preview;
+        position_motion.start(request.position.target(zoom),request.position.speed,request.source);
+    }else if(position_preview&&!parameter_runtime.position_preview_active(now)){
+        position_preview=false;
+        position_motion.start(preview_origin,position_motion.speed,PositionSource::Preview);
+    }
+    if(position_motion.active){
+        parameters::ModelView view(pan_x,pan_y,zoom);
+        position_motion.advance(dt,view);
+        pan_x=view.x;pan_y=view.y;zoom=zoom_target=view.scale;
+        anchor_x=anchor_y=0;
+    }else camera_advance(dt);
     save_model_view_if_due(now);
     view_tick=now;
     constexpr int actions[]={GLFW_KEY_EQUAL,GLFW_KEY_MINUS,GLFW_KEY_HOME,GLFW_KEY_B,GLFW_KEY_F2,GLFW_KEY_F3,GLFW_KEY_W,GLFW_KEY_A,GLFW_KEY_S,GLFW_KEY_D,GLFW_KEY_ESCAPE};
@@ -328,7 +361,7 @@ void editor_preview(size_t target,float value){
     editor_target=int(target);editor_test_value=parameters::bound_value(defs[target],value);
 }
 void editor_release(){editor_target=-1;}
-bool expression_preview(const std::string& packet){return parameter_runtime.ingest(packet,parameters::Clock::now());}
+bool expression_preview(const std::string& packet){return ingest_packet(packet,Clock::now());}
 void expression_preview_clear(){parameter_runtime.clear_expression_preview();}
 bool hot_switch_enabled(){return env_flag("STUDIO_HOT_SWITCH")&&!env_string("STUDIO_LIBRARY_DIR").empty();}
 std::string expression_ui_directory(){const auto& p=parameter_socket.path();return p.empty()?std::string{}:p.substr(0,p.rfind('/'));}
@@ -359,7 +392,7 @@ void commit_model_selection(const ModelSelection& selection){
     parameter_socket.close_socket();reset_controls();selection_committed=true;active_selection()=selection;
     load_model_view(selection.view);invalid_packets=0;
 }
-void reset_controls() { editor_release();editor_current.clear();editor_changed=false;editor_map_valid=false; selected = 0; initialized = false; overrides.clear(); previous.fill(false); position_motion={}; parameter_runtime.reset({}); parameter_socket.drain([](const std::string&){}); }
+void reset_controls() { editor_release();editor_current.clear();editor_changed=false;editor_map_valid=false; selected = 0; initialized = false; overrides.clear(); previous.fill(false); position_motion={}; position_preview=false; parameter_runtime.reset({}); parameter_socket.drain([](const std::string&){}); }
 void update_controls(Model* m, GLFWwindow* w) {
     if (!m) return;
     std::array<bool, keys.size()> pressed{};
@@ -397,7 +430,7 @@ void update_controls(Model* m, GLFWwindow* w) {
     } else if(pressed[5]) list(m);
     const auto now=Clock::now();
     parameter_socket.drain([&](const std::string& packet){
-        if(!parameter_runtime.ingest(packet,now)&&++invalid_packets<=5) std::fprintf(stderr,"[parameters] rejected malformed or unmapped packet\n");
+        if(!ingest_packet(packet,now)&&++invalid_packets<=5) std::fprintf(stderr,"[parameters] rejected malformed or unmapped packet\n");
     });
     parameter_runtime.apply(now,std::chrono::duration<float>(now-parameter_tick).count(),
         [&](size_t i){return m->GetParameterValue(static_cast<int>(i));},

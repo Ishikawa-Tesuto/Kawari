@@ -44,7 +44,7 @@ int main(){
         for action in ('configure-expression','new-hotkey','delete-hotkey','delete-expression','deactivate-all'):
             self.assertIn('"'+action+'"',api)
             self.assertIn(action,ui)
-        self.assertIn('self.activate_raw(&n,false,None,0.)?',api)
+        self.assertIn('self.activate_raw(&other,false,None,0.,false)?',api)
         self.assertIn('!b.expressions.management.protected(n)',mgmt)
         self.assertIn('CLOCK_MONOTONIC',mgmt)
         self.assertIn('ui_expression_timers(timers,t.model)',ui)

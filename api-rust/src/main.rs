@@ -119,14 +119,56 @@ impl Bridge{
  fn refresh(&mut self){if self.paused{return}self.snap.refresh(&self.args.sock.parent().unwrap().join("parameters.tsv"));}
  fn send(&self,p:&str)->ApiResult<()>{if p.len()>LIMIT{return Err(bad("IPC packet too large"))}self.sender.send_to(p.as_bytes(),&self.args.sock).map_err(|e|bad(format!("IPC unavailable: {e}")))?;if p.starts_with("expr ")&&matches!(std::env::var("KAWARI_EXPRESSION_DEBUG").as_deref(),Ok("1")){eprintln!("[expression IPC] {p}");}Ok(())}
  fn activate(&mut self,name:&str,on:bool,fade:Option<f64>,hold:f64)->ApiResult<()>{
-  self.activate_raw(name,on,fade,hold)?;
-  if on {let g=self.expressions.management.group(name);if !g.is_empty(){let others:Vec<_>=self.expressions.order.iter().filter(|n|n.as_str()!=name&&self.expressions.active(n)&&self.expressions.management.group(n)==g).cloned().collect();for n in others{self.activate_raw(&n,false,None,0.)?;}}}Ok(())
+  self.set_expression(name,on,fade,hold,true)
  }
- fn activate_raw(&mut self,name:&str,on:bool,fade:Option<f64>,hold:f64)->ApiResult<()>{let a=self.expressions.assets.get(name).ok_or_else(||bad("Unknown expression"))?;if on{if a.terms.iter().any(|(n,_,_)|!self.snap.params.contains_key(n)){return Err(bad("Missing rig parameters"))}let fi=(fade.unwrap_or(a.fade)*1000.).round() as u64;let fo=(a.fade_out*1000.).round() as u64;let ttl=if hold>0.{((hold*1000.).round() as u64).max(1)}else{0};let mut p=if fi==fo{format!("expr on {} {fi} {ttl}",a.key)}else{format!("expr on2 {} {fi} {ttl} {fo}",a.key)};for(n,b,v)in &a.terms{p.push_str(&format!(" {n} {b} {v}"));}for(id,show)in &a.items{p.push_str(&format!(" {id} I {}",u8::from(*show)));}if let Some(position)=a.position{p.push_str(&position.packet());}self.send(&p)?;self.expressions.order.retain(|n|n!=name);self.expressions.order.push(name.into());self.expressions.active.insert(name.into(),(ttl>0).then(||Instant::now()+Duration::from_millis(ttl)));}else{let p=match fade{Some(v)=>format!("expr off2 {} {}",a.key,(v*1000.).round() as u64),None=>format!("expr off {}",a.key)};self.send(&p)?;self.expressions.active.remove(name);self.expressions.order.retain(|n|n!=name);}Ok(())}
+ fn set_expression(&mut self,name:&str,on:bool,fade:Option<f64>,hold:f64,move_model:bool)->ApiResult<()>{
+  self.activate_raw(name,on,fade,hold,move_model)?;
+  if on&&self.expressions.active(name){
+   let group=self.expressions.management.group(name);
+   if !group.is_empty(){
+    let others:Vec<_>=self.expressions.order.iter()
+     .filter(|n|n.as_str()!=name&&self.expressions.active(n)&&self.expressions.management.group(n)==group)
+     .cloned().collect();
+    for other in others{self.activate_raw(&other,false,None,0.,false)?;}
+   }
+  }
+  Ok(())
+ }
+ fn activate_raw(&mut self,name:&str,on:bool,fade:Option<f64>,hold:f64,move_model:bool)->ApiResult<()>{
+  let asset=self.expressions.assets.get(name).ok_or_else(||bad("Unknown expression"))?;
+  if on{
+   let effects=!asset.terms.is_empty()||!asset.items.is_empty();
+   // A placement-only expression runs on each call and has no active state to restore.
+   if !effects&&!move_model{return Ok(())}
+   if asset.terms.iter().any(|(id,_,_)|!self.snap.params.contains_key(id)){return Err(bad("Missing rig parameters"))}
+   let fi=(fade.unwrap_or(asset.fade)*1000.).round() as u64;
+   let fo=(asset.fade_out*1000.).round() as u64;
+   let ttl=if hold>0.{((hold*1000.).round() as u64).max(1)}else{0};
+   let mut packet=if fi==fo{format!("expr on {} {fi} {ttl}",asset.key)}else{format!("expr on2 {} {fi} {ttl} {fo}",asset.key)};
+   for(id,blend,value)in &asset.terms{packet.push_str(&format!(" {id} {blend} {value}"));}
+   for(id,show)in &asset.items{packet.push_str(&format!(" {id} I {}",u8::from(*show)));}
+   if move_model{if let Some(position)=asset.position{packet.push_str(&position.packet());}}
+   self.send(&packet)?;
+   if effects{
+    self.expressions.order.retain(|entry|entry!=name);
+    self.expressions.order.push(name.into());
+    self.expressions.active.insert(name.into(),(ttl>0).then(||Instant::now()+Duration::from_millis(ttl)));
+   }
+  }else{
+   let packet=match fade{
+    Some(v)=>format!("expr off2 {} {}",asset.key,(v*1000.).round() as u64),
+    None=>format!("expr off {}",asset.key),
+   };
+   self.send(&packet)?;
+   self.expressions.active.remove(name);
+   self.expressions.order.retain(|entry|entry!=name);
+  }
+  Ok(())
+ }
  // Hotkeys use the expression's authored transitions, not the imported VTS shortcut fade.
  fn trigger_hotkey(&mut self,h:&Hotkey)->ApiResult<()>{let on=!self.expressions.active(&h.file);self.activate(&h.file,on,None,h.hold)}
  fn save_state(&self)->AnyResult<()>{if let Some(p)=&self.args.state{let names=self.expressions.order.iter().filter(|n|self.expressions.active.get(*n).is_some_and(|d|d.is_none())).collect::<Vec<_>>();write_json(p,&json!({"schema":"studio-model-state-1","modelID":self.modelid,"activeExpressions":names}))?;}Ok(())}
- fn restore(&mut self)->AnyResult<()>{let saved=if let Some(p)=self.args.state.as_ref().filter(|p|p.exists()){let v=read_json(p)?;if v["schema"]!="studio-model-state-1"||v["modelID"]!=self.modelid{return Err(err("State file belongs to another model"))}let a=v["activeExpressions"].as_array().ok_or_else(||err("Invalid state"))?;if a.len()>64||a.iter().any(|x|!x.is_string()){return Err(err("Invalid state entries"))}Some(a.iter().map(|x|x.as_str().unwrap().to_owned()).collect::<Vec<_>>())}else{None};if self.expressions.assets.is_empty(){return Ok(())}self.refresh();if self.snap.params.is_empty(){return Err(err("Wait until model snapshot ready"))}self.send("expr reset").map_err(|e|err(e.1))?;let initial=saved.is_none();let names=saved.unwrap_or_else(||if self.args.restore{self.expressions.saved.clone()}else{vec![]});for n in names{if let Err(e)=self.activate(&n,true,None,0.){eprintln!("[expressions] {n}: {}",e.1);}}if initial{self.save_state()?;}Ok(())}
+ fn restore(&mut self)->AnyResult<()>{let saved=if let Some(p)=self.args.state.as_ref().filter(|p|p.exists()){let v=read_json(p)?;if v["schema"]!="studio-model-state-1"||v["modelID"]!=self.modelid{return Err(err("State file belongs to another model"))}let a=v["activeExpressions"].as_array().ok_or_else(||err("Invalid state"))?;if a.len()>64||a.iter().any(|x|!x.is_string()){return Err(err("Invalid state entries"))}Some(a.iter().map(|x|x.as_str().unwrap().to_owned()).collect::<Vec<_>>())}else{None};if self.expressions.assets.is_empty(){return Ok(())}self.refresh();if self.snap.params.is_empty(){return Err(err("Wait until model snapshot ready"))}self.send("expr reset").map_err(|e|err(e.1))?;let initial=saved.is_none();let names=saved.unwrap_or_else(||if self.args.restore{self.expressions.saved.clone()}else{vec![]});for n in names{if let Err(e)=self.set_expression(&n,true,None,0.,false){eprintln!("[expressions] {n}: {}",e.1);}}if initial{self.save_state()?;}Ok(())}
  fn inputs(&self,now:Instant)->Params{let mut out=Params::new();for(n,a,b,c,_)in builtins(){out.insert(n.into(),parameter(n,a,b,c,c,Some("VTube Studio")));}for(n,ms)in &self.snap.maps{let lo=ms.iter().map(|(_,a,b)|a.min(*b)).fold(f64::INFINITY,f64::min);let hi=ms.iter().map(|(_,a,b)|a.max(*b)).fold(f64::NEG_INFINITY,f64::max);if let Some(p)=out.get_mut(n){if ms.iter().any(|(t,_,_)|t!=n){p["min"]=json!(lo.min(p["min"].as_f64().unwrap()));p["max"]=json!(hi.max(p["max"].as_f64().unwrap()));}}else{let c=0f64.clamp(lo,hi);out.insert(n.clone(),parameter(n,lo,hi,c,c,Some("Studio")));}}for(n,(_,p))in &self.custom{out.insert(n.clone(),p.clone());}for(n,(v,expiry))in &self.values{if *expiry>now{if let Some(p)=out.get_mut(n){p["value"]=json!(v);}}}out}
  fn route(&self,n:&str)->Option<String>{if self.snap.maps.contains_key(n){return Some(n.into())}let t=builtins().into_iter().find(|x|x.0==n)?.4?;self.snap.maps.get(t).filter(|ms|ms.iter().any(|(x,_,_)|x==t)).map(|_|t.into())}
  fn info(&self)->V{let loaded=!self.paused&&!self.snap.params.is_empty();json!({"modelLoaded":loaded,"modelName":if loaded{self.modelname.as_str()}else{""},"modelID":if loaded{self.modelid.as_str()}else{""}})}

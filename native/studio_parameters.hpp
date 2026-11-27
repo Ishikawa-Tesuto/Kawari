@@ -86,6 +86,9 @@ struct ModelView {
 struct ModelPosition {
     float x=0, y=0, speed=0, scale=0;
     explicit operator bool() const {return speed!=0.f;}
+    bool operator==(const ModelPosition& other) const {
+        return x==other.x&&y==other.y&&speed==other.speed&&scale==other.scale;
+    }
     bool valid() const {
         return ModelView(x,y,scale==0.f?1.f:scale).valid()&&speed>=.05f&&speed<=20.f;
     }
@@ -94,28 +97,29 @@ struct ModelPosition {
 inline float view_distance(const ModelView& from,const ModelView& to) {
     return std::hypot(std::hypot(to.x-from.x,to.y-from.y),std::log(to.scale/from.scale));
 }
+enum class PositionSource { Expression, Obs, Preview };
+struct PositionRequest {
+    ModelPosition position;
+    PositionSource source=PositionSource::Expression;
+};
+
 struct PositionMotion {
-    ModelView view;
-    float speed=1;
-    bool active=false, scaling=false;
-    void advance(float dt,const ModelView& base,const ModelPosition* target) {
-        if (!active) view=base;
-        if (target) {active=true;speed=target->speed;}
-        if (target&&target->scale>0.f) scaling=true;
-        if (!scaling) view.scale=base.scale;
-        if (!active||!std::isfinite(dt)||dt<=0.f) return;
-        const auto goal=target?target->target(base.scale):base;
+    ModelView goal;
+    float speed=0;
+    PositionSource source=PositionSource::Expression;
+    bool active=false;
+
+    void start(const ModelView& target,float transition_speed,PositionSource origin){
+        goal=target;speed=transition_speed;source=origin;active=true;
+    }
+    void advance(float dt,ModelView& view){
+        if(!active||!std::isfinite(dt)||dt<=0.f)return;
         const float distance=view_distance(view,goal),step=speed*std::min(dt,.1f);
-        if (distance<=step) {
-            view=goal;
-            active=target!=nullptr;
-            scaling=target&&target->scale>0.f;
-            return;
-        }
+        if(distance<=step){view=goal;active=false;return;}
         const float fraction=step/distance;
         view.x+=(goal.x-view.x)*fraction;
         view.y+=(goal.y-view.y)*fraction;
-        if (scaling) view.scale*=std::exp(std::log(goal.scale/view.scale)*fraction);
+        view.scale*=std::exp(std::log(goal.scale/view.scale)*fraction);
     }
 };
 class Runtime {
@@ -131,6 +135,7 @@ class Runtime {
         int fade_ms=0, fade_out_ms=0; Clock::time_point changed, deadline=Clock::time_point::max();
     };
     std::vector<Expression> expressions_;
+    PositionRequest pending_position_;
     static float weight_at(const Expression& e, Clock::time_point now) {
         const float t=e.fade_ms?clamp(std::chrono::duration<float,std::milli>(now-e.changed).count()/e.fade_ms,0,1):1;
         return e.start+(e.goal-e.start)*t;
@@ -142,7 +147,7 @@ class Runtime {
     bool expression(std::istringstream& row,Clock::time_point now) {
         std::string op,key,extra;
         if(!(row>>op)) return false;
-        if(op=="reset") {if(row>>extra)return false;expressions_.clear();return true;}
+        if(op=="reset") {if(row>>extra)return false;expressions_.clear();pending_position_={};return true;}
         if(!(row>>key)||!name_ok(key)) return false;
         auto it=std::find_if(expressions_.begin(),expressions_.end(),[&](const Expression& e){return e.key==key;});
         if(op=="off"||op=="off2") {int override_ms=-1;if(op=="off2"&&(!(row>>override_ms)||override_ms<0||override_ms>10000))return false;if(row>>extra)return false;if(it!=expressions_.end())stop(*it,now,override_ms);return true;}
@@ -170,20 +175,41 @@ class Runtime {
             if(i==definitions_.size()||std::any_of(e.terms.begin(),e.terms.end(),[&](const Term& t){return t.target==i;}))return false;
             e.terms.push_back({i,blend,value});
         }
-        if(e.terms.empty()&&e.items.empty()&&!e.position)return false;
-        if(key=="obs-position"&&(!e.position||!e.terms.empty()||!e.items.empty()))return false;
-        if(it!=expressions_.end()) {e.start=weight_at(*it,now);expressions_.erase(it);}
-        else if(key!="editor-preview"&&key!="obs-position"&&std::count_if(expressions_.begin(),expressions_.end(),[](const Expression& a){return a.key!="editor-preview"&&a.key!="obs-position";})>=64)return false;
-        expressions_.push_back(std::move(e));
+        const bool effects=!e.terms.empty()||!e.items.empty();
+        const bool preview=key=="editor-preview", obs=key=="obs-position";
+        if((!effects&&!e.position)||(obs&&effects))return false;
+        if(effects&&!preview&&it==expressions_.end()&&
+           std::count_if(expressions_.begin(),expressions_.end(),[](const Expression& a){return a.key!="editor-preview";})>=64)return false;
+
+        // A live preview refresh only moves the model when its placement changes.
+        if(e.position&&(!preview||op=="on2"||it==expressions_.end()||!(e.position==it->position))){
+            pending_position_.position=e.position;
+            pending_position_.source=preview?PositionSource::Preview:obs?PositionSource::Obs:PositionSource::Expression;
+        }
+        if(it!=expressions_.end()){e.start=weight_at(*it,now);expressions_.erase(it);}
+        if(effects||preview)expressions_.push_back(std::move(e));
         return true;
     }
     static int source(const std::string& s) { return s=="tracking"?0:s=="plugin"?1:s=="test"?2:-1; }
 public:
-    void clear_expression_preview(){expressions_.erase(std::remove_if(expressions_.begin(),expressions_.end(),[](const Expression& e){return e.key=="editor-preview";}),expressions_.end());}
-    const ModelPosition* model_position(Clock::time_point now) const {
-        for(auto it=expressions_.rbegin();it!=expressions_.rend();++it)
-            if(it->position&&it->goal>0&&it->deadline>now)return &it->position;
-        return nullptr;
+    PositionRequest take_position_request(){
+        const auto request=pending_position_;
+        pending_position_={};
+        return request;
+    }
+    void cancel_position_request(PositionSource source){
+        if(pending_position_.source==source)pending_position_={};
+    }
+    bool position_preview_active(Clock::time_point now) const {
+        return std::any_of(expressions_.begin(),expressions_.end(),[&](const Expression& e){
+            return e.key=="editor-preview"&&e.position&&e.goal>0&&e.deadline>now;
+        });
+    }
+    void clear_expression_preview(){
+        cancel_position_request(PositionSource::Preview);
+        expressions_.erase(std::remove_if(expressions_.begin(),expressions_.end(),[](const Expression& e){
+            return e.key=="editor-preview";
+        }),expressions_.end());
     }
     // Use the same envelope and activation order for the image compositor.
     // Evaluate on a copy so a render query cannot mutate runtime or saved scene.
@@ -233,7 +259,7 @@ public:
         return out.str();
     }
     void reset(std::vector<Definition> defs) {
-        definitions_=std::move(defs); maps_.clear(); expressions_.clear();
+        definitions_=std::move(defs); maps_.clear(); expressions_.clear(); pending_position_={};
         for(auto& s:sources_) s.clear();
         for(size_t i=0;i<definitions_.size();++i) {
             const auto& d=definitions_[i];
