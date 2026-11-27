@@ -70,25 +70,52 @@ inline bool item_id_ok(const std::string& id) {
     for(size_t i=6;i<id.size();++i){char c=id[i];if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')))return false;}
     return true;
 }
-struct ModelPosition {
-    float x=0, y=0, speed=0;
-    explicit operator bool() const {return speed!=0.f;}
+constexpr float min_scale=.2f, max_scale=5.f;
+constexpr float pan_limit=10000.f;
+struct ModelView {
+    float x, y, scale;
+    ModelView(float x=0, float y=0, float scale=1) : x(x), y(y), scale(scale) {}
     bool valid() const {
-        return std::isfinite(x)&&std::isfinite(y)&&std::isfinite(speed)&&
-               std::abs(x)<=10.f&&std::abs(y)<=10.f&&speed>=.05f&&speed<=20.f;
+        return std::isfinite(x)&&std::isfinite(y)&&std::abs(x)<=pan_limit&&std::abs(y)<=pan_limit&&
+               scale>=min_scale&&scale<=max_scale;
+    }
+    bool operator==(const ModelView& other) const {
+        return x==other.x&&y==other.y&&scale==other.scale;
     }
 };
+struct ModelPosition {
+    float x=0, y=0, speed=0, scale=0;
+    explicit operator bool() const {return speed!=0.f;}
+    bool valid() const {
+        return ModelView(x,y,scale==0.f?1.f:scale).valid()&&speed>=.05f&&speed<=20.f;
+    }
+    ModelView target(float base_scale) const { return ModelView(x,y,scale>0.f?scale:base_scale); }
+};
+inline float view_distance(const ModelView& from,const ModelView& to) {
+    return std::hypot(std::hypot(to.x-from.x,to.y-from.y),std::log(to.scale/from.scale));
+}
 struct PositionMotion {
-    float x=0, y=0, speed=1;
-    bool active=false;
-    void advance(float dt, float base_x, float base_y, const ModelPosition* target) {
-        if (!active) {x=base_x;y=base_y;}
+    ModelView view;
+    float speed=1;
+    bool active=false, scaling=false;
+    void advance(float dt,const ModelView& base,const ModelPosition* target) {
+        if (!active) view=base;
         if (target) {active=true;speed=target->speed;}
+        if (target&&target->scale>0.f) scaling=true;
+        if (!scaling) view.scale=base.scale;
         if (!active||!std::isfinite(dt)||dt<=0.f) return;
-        const float to_x=target?target->x:base_x,to_y=target?target->y:base_y;
-        const float dx=to_x-x,dy=to_y-y,distance=std::hypot(dx,dy),step=speed*std::min(dt,.1f);
-        if (distance<=step) {x=to_x;y=to_y;active=target!=nullptr;}
-        else {x+=dx*(step/distance);y+=dy*(step/distance);}
+        const auto goal=target?target->target(base.scale):base;
+        const float distance=view_distance(view,goal),step=speed*std::min(dt,.1f);
+        if (distance<=step) {
+            view=goal;
+            active=target!=nullptr;
+            scaling=target&&target->scale>0.f;
+            return;
+        }
+        const float fraction=step/distance;
+        view.x+=(goal.x-view.x)*fraction;
+        view.y+=(goal.y-view.y)*fraction;
+        if (scaling) view.scale*=std::exp(std::log(goal.scale/view.scale)*fraction);
     }
 };
 class Runtime {
@@ -127,9 +154,11 @@ class Runtime {
         std::string name;char blend;float value;
         while(row>>name) {
             if(!(row>>blend>>value)||!std::isfinite(value)||std::abs(value)>1e6f) return false;
-            if(blend=='P') {
+            if(blend=='P'||blend=='V') {
                 ModelPosition p;p.x=value;
-                if(name!="position"||e.position||!(row>>p.y>>p.speed)||!p.valid())return false;
+                if(name!="position"||e.position||!(row>>p.y>>p.speed))return false;
+                if(blend=='V'&&(!(row>>p.scale)||p.scale==0.f))return false;
+                if(!p.valid())return false;
                 e.position=p;continue;
             }
             if(blend=='I') {

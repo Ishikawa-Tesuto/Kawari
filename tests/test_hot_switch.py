@@ -48,8 +48,11 @@ while True:
     except BlockingIOError:pass
     load=mail/'load.txt'
     if load.exists():
-        original,runtime,mapping,editable=load.read_text().splitlines();load.unlink()
+        original,runtime,mapping,editable,view=load.read_text().splitlines();load.unlink()
         assert Path(runtime).is_file() and Path(mapping).is_file() and editable=='1'
+        startup_view=Path(os.environ['STUDIO_VIEW_PROFILE'])
+        assert Path(view).parent==Path(mapping).parent
+        assert (Path(view)==startup_view)==(original==os.environ['STUDIO_ORIGINAL_MODEL'])
         if 'Second.model3.json' in original:
             deadline=time.monotonic()+5
             while not (mail/'test-release').exists() and time.monotonic()<deadline:time.sleep(.02)

@@ -118,11 +118,12 @@ fn parse()->R<Option<Args>>{
     if (a.model.as_os_str().is_empty()&&a.prepare_only)||a.port==0||a.allowed.iter().any(|s|s.trim().is_empty())||!matches!(a.fps,0|30|60|120|144)||!matches!(a.bfps,30|60|120|144)||!a.broadcast_settings().valid()||a.no_preview&&a.no_broadcast{return Err(err("Invalid options; prepare-only requires a model"))}Ok(Some(a))
 }
 impl Args {fn broadcast_settings(&self)->BroadcastSettings{BroadcastSettings{width:self.output.0,height:self.output.1,fps:self.fps,bfps:self.bfps,mask:self.mask,ssaa:self.ssaa,no_preview:self.no_preview,stats:self.stats}}}
-struct Profile{model:PathBuf,runtime:PathBuf,mapping:Option<PathBuf>,state:PathBuf,tokens:PathBuf,_lock:File}
+struct Profile{model:PathBuf,runtime:PathBuf,mapping:Option<PathBuf>,state:PathBuf,tokens:PathBuf,view:PathBuf,_lock:File}
 fn profile_key(p:&Path)->R<String>{let s=p.to_str().ok_or_else(||err("Model path must be UTF-8"))?;Ok(Sha256::digest(s.as_bytes()).iter().take(12).map(|b|format!("{b:02x}")).collect::<Vec<_>>().join(""))}
 fn prepare(a:&Args)->R<Profile>{
     let model=a.model.canonicalize()?;let name=model_name(&model)?;let root=model.parent().unwrap();validate(&model,false)?;
-    let p=if let Some(p)=&a.profile{p.clone()}else{library::directory()?.join("profiles").join(profile_key(&model)?)};
+    let key=profile_key(&model)?;
+    let p=if let Some(p)=&a.profile{p.clone()}else{library::directory()?.join("profiles").join(&key)};
     let p=future_path(&p)?;if p.starts_with(root){return Err(err("Profile must be outside original model directory"))}fs::DirBuilder::new().recursive(true).mode(0o700).create(&p)?;
     let lock=OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW|libc::O_CLOEXEC).open(p.join("session.lock"))?;let lm=lock.metadata()?;if !lm.is_file()||lm.uid()!=unsafe{libc::getuid()}||lm.mode()&0o022!=0{return Err(err("Unsafe profile lock"))}if unsafe{libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock),libc::LOCK_EX|libc::LOCK_NB)}!=0{return Err(err("Profile already in use or cannot lock"))}
     let config=model.with_file_name(format!("{}.vtube.json",name.strip_suffix(".model3.json").unwrap()));let cfg=if config.exists(){Some(read_json(&config)?)}else{None};
@@ -133,7 +134,11 @@ fn prepare(a:&Args)->R<Profile>{
     if mapping.as_ref().is_some_and(|m|!m.is_file()){return Err(err("Expected mapping file"))}
     let state=future_path(&a.state.clone().unwrap_or_else(||p.join("state.json")))?;let tokens=future_path(&p.join("api-tokens.json"))?;
     for f in [&state,&tokens]{if f.starts_with(root)||f.starts_with(runtime.parent().unwrap())||f==&p.join("session.lock")||mapping.as_ref()==Some(f){return Err(err("State/token path conflicts with model, mapping or lock"))}}if state==tokens{return Err(err("State/token collision"))}
-    println!("[studio] profile: {}",p.display());println!("[studio] runtime: {}",runtime.display());Ok(Profile{model,runtime,mapping,state,tokens,_lock:lock})
+    let view=p.join(format!("view-{key}.tsv"));
+    if state==view||tokens==view||mapping.as_ref()==Some(&view)||view.starts_with(runtime.parent().unwrap()){
+        return Err(err("Model view path conflicts with model, mapping or state"));
+    }
+    println!("[studio] profile: {}",p.display());println!("[studio] runtime: {}",runtime.display());Ok(Profile{model,runtime,mapping,state,tokens,view,_lock:lock})
 }
 struct Managed{child:Child}
 impl Managed{
@@ -224,6 +229,9 @@ fn prepared_selection(dir:&Path,p:&Profile,a:&Args)->R<()> {
         writeln!(f,"{text}")?;
     }
     writeln!(f,"{}",(a.mapping.is_none()&&p.mapping.is_some()) as u8)?;
+    let view=p.view.to_str().ok_or_else(||err("Model view path must be UTF-8"))?;
+    if view.len()>8192||view.chars().any(|c|c.is_control()){return Err(err("Unsafe model view path"))}
+    writeln!(f,"{view}")?;
     f.persist(dir.join("load.txt"))?;Ok(())
 }
 // A successful commit rotates the Unix socket, so the old API cannot inject
@@ -258,7 +266,7 @@ fn run_session(a:&mut Args,p:&mut Profile,lib:&mut library::Library,runtime:&Run
     atomic_text(&mailbox.path().join("broadcast-current.tsv"),&a.broadcast_settings().encode())?;
     lib.refresh(&p.model);lib.publish(mailbox.path()).map_err(|e|err(format!("Cannot publish model library in {}: {e}",mailbox.path().display())))?;
     let (tx,rx)=mpsc::channel();let mut viewer_cmd=viewer_command(a,p,runtime)?;
-    viewer_cmd.env("STUDIO_LIBRARY_DIR",mailbox.path()).env("STUDIO_ORIGINAL_MODEL",&p.model).env("STUDIO_HOT_SWITCH",if hot{"1"}else{"0"}).env("STUDIO_HOT_SWITCH_PROTOCOL",if hot{"1"}else{"0"});
+    viewer_cmd.env("STUDIO_LIBRARY_DIR",mailbox.path()).env("STUDIO_ORIGINAL_MODEL",&p.model).env("STUDIO_VIEW_PROFILE",&p.view).env("STUDIO_HOT_SWITCH",if hot{"1"}else{"0"}).env("STUDIO_HOT_SWITCH_PROTOCOL",if hot{"1"}else{"0"});
     println!("[studio] Model switching: {}",if hot{"hot (protocol 1)"}else{"restart"});
     let mut viewer=Managed::spawn(viewer_cmd,"viewer",tx.clone())?;
     let Some(s)=wait_event(&rx,"socket",&mut viewer,None,a.timeout)? else{return Ok(SessionExit::End(0))};

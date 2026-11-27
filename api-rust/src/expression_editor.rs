@@ -8,6 +8,7 @@ pub(super) struct ModelPosition {
     x: f64,
     y: f64,
     speed: f64,
+    scale: Option<f64>,
 }
 impl ModelPosition {
     fn parse(value: &V) -> AnyResult<Self> {
@@ -15,10 +16,18 @@ impl ModelPosition {
             num(&value[key]).filter(|n| (lo..=hi).contains(n))
                 .ok_or_else(|| err(format!("Invalid model position {key}")))
         };
-        Ok(Self { x: field("X", -10., 10.)?, y: field("Y", -10., 10.)?, speed: field("Speed", 0.05, 20.)? })
+        Ok(Self {
+            x: field("X", -10_000., 10_000.)?,
+            y: field("Y", -10_000., 10_000.)?,
+            speed: field("Speed", 0.05, 20.)?,
+            scale: value.get("Scale").map(|_| field("Scale", 0.2, 5.)).transpose()?,
+        })
     }
     pub fn packet(self) -> String {
-        format!(" position P {:.8} {:.8} {:.8}", self.x, self.y, self.speed)
+        match self.scale {
+            Some(scale) => format!(" position V {:.8} {:.8} {:.8} {:.8}", self.x, self.y, self.speed, scale),
+            None => format!(" position P {:.8} {:.8} {:.8}", self.x, self.y, self.speed),
+        }
     }
 }
 
@@ -75,7 +84,11 @@ pub(super) fn details(b:&Bridge)->String{
         out.push_str(&format!("D\t{}\t{}\t{}\n",a.key,a.fade,a.fade_out));
         for(id,blend,val)in &a.terms{out.push_str(&format!("T\t{}\t{}\t{}\t{}\n",a.key,id,blend,val));}
         for(id,show)in &a.items{out.push_str(&format!("I\t{}\t{}\t{}\n",a.key,id,u8::from(*show)));}
-        if let Some(p)=a.position {out.push_str(&format!("P\t{}\t{}\t{}\t{}\n",a.key,p.x,p.y,p.speed));}
+        if let Some(p)=a.position {
+            out.push_str(&format!("P\t{}\t{}\t{}\t{}",a.key,p.x,p.y,p.speed));
+            if let Some(scale)=p.scale {out.push_str(&format!("\t{scale}"));}
+            out.push('\n');
+        }
     }out
 }
 pub(super) fn save(b:&mut Bridge,fields:&[&str])->AnyResult<()>{
@@ -91,13 +104,18 @@ pub(super) fn save(b:&mut Bridge,fields:&[&str])->AnyResult<()>{
     let mut terms=vec![];let mut items=vec![];let mut position=None;
     for row in fields[5..].chunks_exact(3){
         let id=row[0];if row[1]=="I"{let show=match row[2]{"1"=>true,"0"=>false,_=>return Err(err("Invalid item visibility"))};items.push(json!({"Id":id,"Visible":show}));continue;}
-        if row[1]=="P" {
-            let values:Vec<_>=row[2].split_ascii_whitespace().collect();
-            let [x,y,speed]=values.as_slice() else{return Err(err("Invalid model position"))};
+        if matches!(row[1],"P"|"V") {
             if id!="position"||position.is_some(){return Err(err("Invalid or duplicate model position"))}
-            let values=[x.parse::<f64>()?,y.parse()?,speed.parse()?];
-            if values.iter().any(|n| !n.is_finite()){return Err(err("Invalid model position"))}
-            position=Some(json!({"X":values[0],"Y":values[1],"Speed":values[2]}));
+            let mut values=row[2].split_ascii_whitespace().map(|s|s.parse::<f64>().ok().filter(|n|n.is_finite()));
+            let (Some(Some(x)),Some(Some(y)),Some(Some(speed)))=(values.next(),values.next(),values.next())
+                else{return Err(err("Invalid model position"))};
+            let mut view=json!({"X":x,"Y":y,"Speed":speed});
+            if row[1]=="V" {
+                let Some(Some(scale))=values.next() else{return Err(err("Invalid model scale"))};
+                view["Scale"]=json!(scale);
+            }
+            if values.next().is_some(){return Err(err("Invalid model position"))}
+            position=Some(view);
             continue;
         }
         if !b.snap.params.contains_key(id){return Err(err("Missing rig parameter"))}
@@ -122,6 +140,15 @@ pub(super) fn save(b:&mut Bridge,fields:&[&str])->AnyResult<()>{
 mod tests {
     use std::os::unix::fs::DirBuilderExt;
     use super::*;
+    #[test]
+    fn scaled_position_expression() {
+        let mut model=json!({"KawariPosition":{"X":12,"Y":-0.25,"Speed":0.5,"Scale":1.75}});
+        let asset=parse_asset("Move.exp3.json",&model).unwrap();
+        assert_eq!(asset.position.unwrap().packet()," position V 12.00000000 -0.25000000 0.50000000 1.75000000");
+        model["KawariPosition"]["Scale"]=json!(0.0);
+        assert!(parse_asset("Move.exp3.json",&model).is_err());
+    }
+
     #[test]
     fn position_only_expression() {
         let asset = parse_asset("Chat.exp3.json", &json!({

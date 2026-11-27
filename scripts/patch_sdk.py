@@ -518,7 +518,7 @@ endif()
     files[src / 'LAppView.cpp'] = view
     delegate = files[src / 'LAppDelegate.cpp']
     delegate = rep(delegate, '#include "studio_background.hpp"', '#include "studio_background.hpp"\n#include "studio_ui.hpp"\n#include "studio_ui_layout.hpp"', 'workspace lifecycle include')
-    delegate = rep(delegate, 'void LAppDelegate::Release()\n{', 'void LAppDelegate::Release()\n{\n    studio::ui_shutdown();', 'workspace teardown before device')
+    delegate = rep(delegate, 'void LAppDelegate::Release()\n{', 'void LAppDelegate::Release()\n{\n    studio::camera_save();\n    studio::ui_shutdown();', 'workspace teardown before device')
     files[src / 'LAppDelegate.cpp'] = delegate
     h = files[src / 'VulkanManager.hpp']
     h = rep(h, '    bool UpdateDrawFrame();', '    bool UpdateDrawFrame();\n    VkInstance GetStudioInstance() const { return _instance; }', 'workspace instance accessor')

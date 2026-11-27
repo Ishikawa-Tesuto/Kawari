@@ -61,28 +61,50 @@ int main(){
     auto near=[](float a,float b){assert(std::abs(a-b)<.001f);};
 
     assert(runtime.ingest("expr on position-only 0 0 position P 0.6 0.8 1",time));
-    motion.advance(.1f,0,0,runtime.model_position(time));
-    near(motion.x,.06f);near(motion.y,.08f);
+    motion.advance(.1f,{},runtime.model_position(time));
+    near(motion.view.x,.06f);near(motion.view.y,.08f);
     assert(runtime.ingest("expr on2 timed 500 200 500 Smile O 1 position P 0.66 0.08 2",time));
-    motion.advance(.1f,0,0,runtime.model_position(time));
-    near(motion.x,.26f);near(motion.y,.08f);
+    motion.advance(.1f,{},runtime.model_position(time));
+    near(motion.view.x,.26f);near(motion.view.y,.08f);
     assert(runtime.model_position(later)->x==.6f);
 
     assert(runtime.ingest("expr on obs-position 0 0 position P 0.26 -0.42 1",later));
-    motion.advance(.1f,0,0,runtime.model_position(later));
-    near(motion.x,.26f);near(motion.y,-.02f);
+    motion.advance(.1f,{},runtime.model_position(later));
+    near(motion.view.x,.26f);near(motion.view.y,-.02f);
     assert(runtime.ingest("expr off obs-position",later));
     assert(runtime.model_position(later)->x==.6f);
     assert(runtime.ingest("expr off position-only",later));
     assert(runtime.model_position(later)==nullptr);
-    const float distance=std::hypot(motion.x,motion.y);
-    motion.advance(.1f,0,0,runtime.model_position(later));
-    near(std::hypot(motion.x,motion.y),distance-.1f);
-    for(int i=0;i<50;++i)motion.advance(.01f,0,0,runtime.model_position(later));
-    assert(!motion.active);near(motion.x,0);near(motion.y,0);
+    const float distance=std::hypot(motion.view.x,motion.view.y);
+    motion.advance(.1f,{},runtime.model_position(later));
+    near(std::hypot(motion.view.x,motion.view.y),distance-.1f);
+    for(int i=0;i<50;++i)motion.advance(.01f,{},runtime.model_position(later));
+    assert(!motion.active);near(motion.view.x,0);near(motion.view.y,0);
 
+    assert(runtime.ingest("expr on obs-position 0 0 position V 0.4 0 1 2",later));
+    const float travel=view_distance({},runtime.model_position(later)->target(1));
+    motion.advance(travel*.1f,{},runtime.model_position(later));
+    near(motion.view.x,.04f);near(motion.view.scale,std::pow(2.f,.1f));
+
+    PositionMotion faster;
+    const ModelView base(.2f,-.5f,1.5f);
+    for(int i=0;i<200;++i)faster.advance(.01f,base,runtime.model_position(later));
+    near(faster.view.x,.4f);near(faster.view.y,0);near(faster.view.scale,2.f);
+    assert(runtime.ingest("expr off obs-position",later));
+    faster.advance(.1f,base,runtime.model_position(later));
+    assert(faster.view.scale<2.f&&faster.view.scale>1.5f);
+    for(int i=0;i<100;++i)faster.advance(.01f,base,runtime.model_position(later));
+    assert(!faster.active&&!faster.scaling&&faster.view==base);
+    assert(runtime.ingest("expr on old 0 0 position P 0 0 1",later));
+    faster.advance(.1f,base,runtime.model_position(later));
+    near(faster.view.scale,1.5f);
+    faster.advance(.1f,{.2f,-.5f,3.f},runtime.model_position(later));
+    near(faster.view.scale,3.f);
+
+    assert(!runtime.ingest("expr on bad 0 0 position V 0 0 1 0",time));
+    assert(!runtime.ingest("expr on bad 0 0 position V 0 0 1 6",time));
     assert(!runtime.ingest("expr on bad 0 0 position P 0 0 0",time));
-    assert(!runtime.ingest("expr on bad 0 0 position P 12 0 1",time));
+    assert(!runtime.ingest("expr on bad 0 0 position P 10001 0 1",time));
     assert(!runtime.ingest("expr on obs-position 0 0 Smile O 1 position P 0 0 1",time));
 }
 '''

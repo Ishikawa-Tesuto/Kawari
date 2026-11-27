@@ -18,6 +18,7 @@ void update_view(GLFWwindow* window);
 void apply_camera(float* projection);
 bool camera_is_default();
 float camera_scale();
+float camera_base_scale();
 void camera_offset(float& x,float& y);
 void camera_zoom(float factor);
 void camera_zoom_at(float factor,float x,float y);
@@ -25,6 +26,7 @@ void camera_pan(float x,float y);
 void camera_scroll(float delta,float x,float y);
 void camera_advance(float seconds);
 void camera_reset();
+void camera_save();
 void cycle_background();
 bool demo_visible();
 bool offscreen();
@@ -49,7 +51,7 @@ void expression_preview_clear();
 
 namespace studio {
 // All model-switch state belongs to the renderer thread.
-struct ModelSelection { std::string original,runtime,mapping; bool editable=false; };
+struct ModelSelection { std::string original,runtime,mapping,view; bool editable=false; };
 bool hot_switch_enabled();
 bool take_model_selection(ModelSelection& selection);
 void commit_model_selection(const ModelSelection& selection);

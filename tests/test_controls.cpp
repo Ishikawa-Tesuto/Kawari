@@ -3,11 +3,52 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <thread>
 #include <glob.h>
 #include <unistd.h>
 int test_key=-1;
 void press(GLFWwindow& w,int key) {test_key=key;studio::update_view(&w);test_key=-1;studio::update_view(&w);}
-int main() {
+void test_model_views(const std::string& dir,bool restore) {
+    const std::string first=dir+"/first.tsv",second=dir+"/second.tsv";
+    setenv("STUDIO_VIEW_PROFILE",first.c_str(),1);
+    setenv("STUDIO_HOT_SWITCH","1",1);setenv("STUDIO_LIBRARY_DIR",dir.c_str(),1);
+    GLFWwindow window;
+    studio::update_view(&window);
+    auto check=[](float x,float y,float scale){
+        float transform[16]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        studio::apply_camera(transform);
+        assert(std::abs(transform[12]-x)<.0001f && std::abs(transform[13]-y)<.0001f);
+        assert(std::abs(transform[0]-scale)<.0001f && std::abs(studio::camera_scale()-scale)<.0001f);
+    };
+    auto switch_to=[&](const std::string& profile){
+        const std::string mailbox=dir+"/load.txt";
+        {std::ofstream request(mailbox);request<<"/model.model3.json\n/model.model3.json\n\n0\n"<<profile<<'\n';}
+        studio::ModelSelection selection;
+        assert(studio::take_model_selection(selection));
+        studio::commit_model_selection(selection);
+    };
+    if(!restore){
+        check(0,0,1);
+        studio::camera_pan(.5f,.25f);
+        studio::camera_scroll(1.f,0,0);
+        assert(studio::expression_preview("expr on obs-position 0 0 position V 0.7 0.25 20 1.2"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(35));
+        studio::update_view(&window);
+        check(.7f,.25f,1.2f);
+
+        switch_to(second);
+        check(0,0,1);
+        studio::camera_zoom(2.f);
+        studio::camera_pan(-.2f,.4f);
+        switch_to(first);
+    }
+    check(.5375f,.26875f,1.075f);
+    switch_to(second);
+    check(-.2f,.4f,2.f);
+    if(restore){studio::camera_reset();studio::camera_save();check(0,0,1);}
+}
+int main(int argc,char** argv) {
+    if(argc==3){test_model_views(argv[1],std::string(argv[2])=="restore");return 0;}
     GLFWwindow w;
     assert(studio::camera_is_default());
     assert(!studio::demo_visible());

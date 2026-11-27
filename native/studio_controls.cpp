@@ -16,6 +16,8 @@
 #include <cmath>
 #include <cstring>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <cerrno>
 #include <unistd.h>
 
 namespace studio {
@@ -27,11 +29,8 @@ float zoom = 1.f, pan_x = 0.f, pan_y = 0.f;
 parameters::PositionMotion position_motion;
 float zoom_target = 1.f, anchor_x = 0.f, anchor_y = 0.f;
 Clock::time_point view_tick{};
-constexpr float min_zoom=.2f, max_zoom=5.f;
-// Numerical guard only, not a viewport-sized panning boundary.
-constexpr float pan_limit=10000.f;
-float limit_pan(float v){return std::max(-pan_limit,std::min(pan_limit,v));}
-float limit_zoom(float v){return std::max(min_zoom,std::min(max_zoom,v));}
+float limit_pan(float v){return parameters::clamp(v,-parameters::pan_limit,parameters::pan_limit);}
+float limit_zoom(float v){return parameters::clamp(v,parameters::min_scale,parameters::max_scale);}
 void scale_about(float next,float x,float y){
     const float ratio=next/zoom;
     pan_x=limit_pan(x+(pan_x-x)*ratio);
@@ -65,10 +64,86 @@ double rss_mib() {
 }
 
 std::string env_string(const char* key) { const char* p=std::getenv(key); return p?p:""; }
+
+struct ViewProfile {
+    std::string path;
+    parameters::ModelView saved, desired;
+    Clock::time_point next_save{};
+    bool loaded=false, write_error=false;
+};
+ViewProfile view_profile;
+
+bool safe_view_file(const struct stat& st){
+    return S_ISREG(st.st_mode)&&st.st_uid==getuid()&&st.st_nlink==1&&!(st.st_mode&0077);
+}
+bool read_model_view(const std::string& path,parameters::ModelView& view){
+    const int fd=open(path.c_str(),O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+    if(fd<0)return errno==ENOENT;
+    struct stat st{};
+    if(fstat(fd,&st)!=0||!safe_view_file(st)||st.st_size<=0||st.st_size>128){close(fd);return false;}
+    std::string data;char buffer[129];ssize_t count;
+    do{
+        count=read(fd,buffer,sizeof(buffer));
+        if(count>0)data.append(buffer,size_t(count));
+    }while((count>0||(count<0&&errno==EINTR))&&data.size()<=128);
+    close(fd);
+    if(count!=0)return false;
+    std::istringstream input(data);input.imbue(std::locale::classic());
+    parameters::ModelView pending;std::string version,extra;
+    if(!(input>>version>>pending.x>>pending.y>>pending.scale)||version!="kawari-view-1"||
+       (input>>extra)||!pending.valid())return false;
+    view=pending;return true;
+}
+bool write_model_view(const std::string& path,const parameters::ModelView& view){
+    struct stat st{};
+    const int result=lstat(path.c_str(),&st);
+    if((result==0&&!safe_view_file(st))||(result!=0&&errno!=ENOENT))return false;
+    std::ostringstream out;out.imbue(std::locale::classic());
+    out.precision(std::numeric_limits<float>::max_digits10);
+    out<<"kawari-view-1\n"<<view.x<<' '<<view.y<<' '<<view.scale<<'\n';
+    const auto data=out.str();
+    const auto pattern=path+".tmp-XXXXXX";
+    std::vector<char> tmp(pattern.begin(),pattern.end());tmp.push_back(0);
+    const int fd=mkstemp(tmp.data());
+    if(fd<0)return false;
+    FILE* file=fdopen(fd,"wb");
+    bool written=false;
+    if(file){
+        written=fwrite(data.data(),1,data.size(),file)==data.size();
+        if(fflush(file)!=0||fsync(fd)!=0)written=false;
+        if(fclose(file)!=0)written=false;
+    }else close(fd);
+    if(written&&std::rename(tmp.data(),path.c_str())==0)return true;
+    unlink(tmp.data());return false;
+}
+void load_model_view(const std::string& path){
+    view_profile=ViewProfile{};
+    view_profile.path=path;view_profile.loaded=true;
+    if(!path.empty()&&!read_model_view(path,view_profile.saved))
+        std::fprintf(stderr,"[studio] Could not load model position and scale: %s\n",path.c_str());
+    const auto& view=view_profile.saved;
+    view_profile.desired=view;
+    pan_x=view.x;pan_y=view.y;zoom=zoom_target=view.scale;
+    anchor_x=anchor_y=0;view_tick={};position_motion={};
+}
+void save_model_view_if_due(Clock::time_point now){
+    if(now>=view_profile.next_save)camera_save();
+}
+void remember_model_view(){
+    if(view_profile.path.empty())return;
+    // Save the requested endpoint even if the smooth wheel zoom is still animating.
+    const float ratio=zoom_target/zoom;
+    view_profile.desired={
+        limit_pan(anchor_x+(pan_x-anchor_x)*ratio),
+        limit_pan(anchor_y+(pan_y-anchor_y)*ratio),
+        zoom_target,
+    };
+    save_model_view_if_due(Clock::now());
+}
 bool selection_committed=false;
 ModelSelection& active_selection(){
     static ModelSelection s;
-    if(!selection_committed){s.original=env_string("STUDIO_ORIGINAL_MODEL");s.runtime=env_string("STUDIO_MODEL");s.mapping=env_string("STUDIO_PARAMETER_MAP");s.editable=!s.mapping.empty()&&env_string("STUDIO_EDITABLE_MAP")==s.mapping;}
+    if(!selection_committed){s.original=env_string("STUDIO_ORIGINAL_MODEL");s.runtime=env_string("STUDIO_MODEL");s.mapping=env_string("STUDIO_PARAMETER_MAP");s.view=env_string("STUDIO_VIEW_PROFILE");s.editable=!s.mapping.empty()&&env_string("STUDIO_EDITABLE_MAP")==s.mapping;}
     return s;
 }
 bool initialized = false;
@@ -123,17 +198,23 @@ int window_width(int fallback) { return dimension("STUDIO_WIDTH",fallback); }
 int window_height(int fallback) { return dimension("STUDIO_HEIGHT",fallback); }
 bool camera_is_default() {
     float x,y;camera_offset(x,y);
-    return zoom==1.f && zoom_target==1.f && x==0.f && y==0.f;
+    return camera_scale()==1.f && zoom_target==1.f && x==0.f && y==0.f;
 }
-float camera_scale() { return zoom; }
-void camera_offset(float& x,float& y){x=position_motion.active?position_motion.x:pan_x;y=position_motion.active?position_motion.y:pan_y;}
+float camera_scale() { return position_motion.scaling?position_motion.view.scale:zoom; }
+float camera_base_scale() { return zoom; }
+void camera_offset(float& x,float& y){
+    x=position_motion.active?position_motion.view.x:pan_x;
+    y=position_motion.active?position_motion.view.y:pan_y;
+}
 void camera_zoom(float factor) {
     if(!std::isfinite(factor)||factor<=0)return;
     zoom=zoom_target=limit_zoom(zoom*factor);
+    remember_model_view();
 }
 void camera_zoom_at(float factor,float x,float y) {
     if (!std::isfinite(factor) || factor<=0 || !std::isfinite(x) || !std::isfinite(y)) return;
     zoom_target=limit_zoom(zoom*factor);scale_about(zoom_target,x,y);
+    remember_model_view();
 }
 void camera_scroll(float delta,float x,float y){
     if(!std::isfinite(delta)||delta==0||!std::isfinite(x)||!std::isfinite(y))return;
@@ -141,6 +222,7 @@ void camera_scroll(float delta,float x,float y){
     const float step=std::max(-64.f,std::min(64.f,delta));
     zoom_target=limit_zoom(zoom_target*std::pow(1.075f,step));
     anchor_x=x;anchor_y=y;
+    remember_model_view();
 }
 void camera_advance(float dt){
     if(!std::isfinite(dt)||dt<=0||zoom==zoom_target)return;
@@ -150,24 +232,45 @@ void camera_advance(float dt){
     scale_about(next,anchor_x,anchor_y);
 }
 void camera_pan(float x,float y) {
-    if(!std::isfinite(x)||!std::isfinite(y))return;
+    if(!std::isfinite(x)||!std::isfinite(y)||(x==0.f&&y==0.f))return;
     const float old_x=pan_x,old_y=pan_y;
     pan_x=limit_pan(pan_x+x);pan_y=limit_pan(pan_y+y);
     // A drag during a zoom translates its anchor as well.
     anchor_x+=pan_x-old_x;anchor_y+=pan_y-old_y;
+    remember_model_view();
 }
-void camera_reset() { zoom=zoom_target=1;pan_x=pan_y=anchor_x=anchor_y=0;view_tick={}; }
+void camera_reset(){
+    zoom=zoom_target=1;pan_x=pan_y=anchor_x=anchor_y=0;view_tick={};
+    remember_model_view();
+}
+void camera_save(){
+    auto& profile=view_profile;
+    if(profile.path.empty()||profile.desired==profile.saved)return;
+    if(write_model_view(profile.path,profile.desired)){
+        profile.saved=profile.desired;
+        profile.write_error=false;
+        profile.next_save=Clock::now()+std::chrono::milliseconds(250);
+    }else{
+        if(!profile.write_error)
+            std::fprintf(stderr,"[studio] Could not save model position and scale: %s\n",profile.path.c_str());
+        profile.write_error=true;
+        profile.next_save=Clock::now()+std::chrono::seconds(2);
+    }
+}
 void cycle_background() { show_demo=false;bg_index=(bg_index+1)%4; }
 void apply_camera(float* m) {
     float x,y;camera_offset(x,y);
+    const float scale=camera_scale();
     // Clip-space affine transform: scale XY, then translate by W.
-    for (int i=0;i<16;i+=4) { m[i]=zoom*m[i]+x*m[i+3]; m[i+1]=zoom*m[i+1]+y*m[i+3]; }
+    for (int i=0;i<16;i+=4) { m[i]=scale*m[i]+x*m[i+3]; m[i+1]=scale*m[i+1]+y*m[i+3]; }
 }
 void update_view(GLFWwindow* w) {
+    if(!view_profile.loaded)load_model_view(active_selection().view);
     const auto now=Clock::now();
     const float dt=view_tick==Clock::time_point{}?0.f:std::chrono::duration<float>(now-view_tick).count();
     camera_advance(dt);
-    position_motion.advance(dt,pan_x,pan_y,parameter_runtime.model_position(now));
+    position_motion.advance(dt,{pan_x,pan_y,zoom},parameter_runtime.model_position(now));
+    save_model_view_if_due(now);
     view_tick=now;
     constexpr int actions[]={GLFW_KEY_EQUAL,GLFW_KEY_MINUS,GLFW_KEY_HOME,GLFW_KEY_B,GLFW_KEY_F2,GLFW_KEY_F3,GLFW_KEY_W,GLFW_KEY_A,GLFW_KEY_S,GLFW_KEY_D,GLFW_KEY_ESCAPE};
     static bool last[sizeof(actions)/sizeof(actions[0])]{};
@@ -238,17 +341,23 @@ bool take_model_selection(ModelSelection& selection){
     const std::string path=env_string("STUDIO_LIBRARY_DIR")+"/load.txt";
     std::ifstream f(path,std::ios::binary);if(!f)return false;
     std::string editable,extra;
-    const bool valid=bool(std::getline(f,selection.original)&&std::getline(f,selection.runtime)&&std::getline(f,selection.mapping)&&std::getline(f,editable))&&!std::getline(f,extra);
+    const bool has_base=bool(std::getline(f,selection.original)&&std::getline(f,selection.runtime)&&
+                             std::getline(f,selection.mapping)&&std::getline(f,editable));
+    selection.view.clear();
+    const bool has_extra=std::getline(f,selection.view)&&std::getline(f,extra);
     f.close();if(std::remove(path.c_str())!=0)return false;
     const auto safe=[](const std::string& s){return !s.empty()&&s.size()<=8192&&s.front()=='/'&&s.find_first_of("\r\n\t")==std::string::npos&&s.find('\0')==std::string::npos;};
-    if(!valid||!safe(selection.original)||!safe(selection.runtime)||(!selection.mapping.empty()&&!safe(selection.mapping))||(editable!="0"&&editable!="1")){
+    if(!has_base||has_extra||!safe(selection.original)||!safe(selection.runtime)||
+       (!selection.mapping.empty()&&!safe(selection.mapping))||(!selection.view.empty()&&!safe(selection.view))||
+       (editable!="0"&&editable!="1")){
         std::puts("[model-switch] rejected: invalid prepared selection");std::fflush(stdout);return false;
     }
     selection.editable=editable=="1";return true;
 }
 void commit_model_selection(const ModelSelection& selection){
+    camera_save();
     parameter_socket.close_socket();reset_controls();selection_committed=true;active_selection()=selection;
-    camera_reset();invalid_packets=0;
+    load_model_view(selection.view);invalid_packets=0;
 }
 void reset_controls() { editor_release();editor_current.clear();editor_changed=false;editor_map_valid=false; selected = 0; initialized = false; overrides.clear(); previous.fill(false); position_motion={}; parameter_runtime.reset({}); parameter_socket.drain([](const std::string&){}); }
 void update_controls(Model* m, GLFWwindow* w) {

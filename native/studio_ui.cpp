@@ -481,18 +481,23 @@ void expression_editor_draw(){
         bool enabled=bool(d.detail.position);
         if(ImGui::Checkbox("Move model",&enabled)){
             if(enabled){
-                parameters::ModelPosition p;p.speed=1.f;camera_offset(p.x,p.y);
-                p.x=parameters::clamp(p.x,-10.f,10.f);p.y=parameters::clamp(p.y,-10.f,10.f);
+                parameters::ModelPosition p;p.speed=1.f;p.scale=camera_scale();
+                camera_offset(p.x,p.y);
                 d.detail.position=p;
             }else d.detail.position={};
         }
         if(auto& p=d.detail.position){
-            ImGui::DragFloat("X (right)",&p.x,.01f,-10.f,10.f,"%.3f",ImGuiSliderFlags_AlwaysClamp);
-            ImGui::DragFloat("Y (up)",&p.y,.01f,-10.f,10.f,"%.3f",ImGuiSliderFlags_AlwaysClamp);
-            ImGui::DragFloat("Speed (canvas units/s)",&p.speed,.01f,.05f,20.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
-            if(ImGui::Button("Use current position")){
+            constexpr float bound=parameters::pan_limit;
+            ImGui::DragFloat("X (right)",&p.x,.01f,-bound,bound,"%.3f",ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Y (up)",&p.y,.01f,-bound,bound,"%.3f",ImGuiSliderFlags_AlwaysClamp);
+            bool change_scale=p.scale>0.f;
+            if(ImGui::Checkbox("Change scale",&change_scale))p.scale=change_scale?camera_scale():0.f;
+            if(change_scale)
+                ImGui::DragFloat("Scale",&p.scale,.01f,parameters::min_scale,parameters::max_scale,"%.2fx",ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Transition speed",&p.speed,.01f,.05f,20.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+            if(ImGui::Button("Use current placement")){
                 camera_offset(p.x,p.y);
-                p.x=parameters::clamp(p.x,-10.f,10.f);p.y=parameters::clamp(p.y,-10.f,10.f);
+                if(change_scale)p.scale=camera_scale();
             }
         }
       }
@@ -502,14 +507,18 @@ void expression_editor_draw(){
     std::ostringstream terms;terms.imbue(std::locale::classic());terms<<std::setprecision(9);
     for(const auto& t:d.detail.terms)terms<<' '<<t.id<<' '<<t.blend<<' '<<t.value;
     for(const auto& t:d.detail.items)terms<<' '<<t.id<<" I "<<(t.show?1:0);
-    if(const auto& p=d.detail.position)terms<<" position P "<<p.x<<' '<<p.y<<' '<<p.speed;
+    if(const auto& p=d.detail.position){
+      terms<<" position "<<(p.scale>0.f?'V':'P')<<' '<<p.x<<' '<<p.y<<' '<<p.speed;
+      if(p.scale>0.f)terms<<' '<<p.scale;
+    }
     if(run_test&&valid){
       d.preview=false;expression_preview_clear();
       const auto fi=std::lround(d.detail.fade*1000.f),fo=std::lround(d.detail.fade_out*1000.f);
       long travel=0;
       if(const auto& p=d.detail.position){
         float x,y;camera_offset(x,y);
-        travel=std::min(86399000L,std::lround(1000.f*std::hypot(p.x-x,p.y-y)/p.speed));
+        const float distance=parameters::view_distance({x,y,camera_scale()},p.target(camera_base_scale()));
+        travel=std::min(86399000L,std::lround(1000.f*distance/p.speed));
       }
       const auto hold=std::max(fi,travel)+1000;
       if(expression_preview("expr on2 editor-preview "+std::to_string(fi)+" "+std::to_string(hold)+" "+std::to_string(fo)+terms.str())){
@@ -523,7 +532,10 @@ void expression_editor_draw(){
       std::ostringstream req;req.imbue(std::locale::classic());req<<std::setprecision(9)<<"save-expression\t"<<d.key<<'\t'<<(d.key=="new"?d.name:"")<<'\t'<<d.detail.fade<<'\t'<<d.detail.fade_out;
       for(const auto& t:d.detail.terms)req<<'\t'<<t.id<<'\t'<<t.blend<<'\t'<<t.value;
       for(const auto& t:d.detail.items)req<<'\t'<<t.id<<"\tI\t"<<(t.show?1:0);
-      if(const auto& p=d.detail.position)req<<"\tposition\tP\t"<<p.x<<' '<<p.y<<' '<<p.speed;
+      if(const auto& p=d.detail.position){
+        req<<"\tposition\t"<<(p.scale>0.f?'V':'P')<<'\t'<<p.x<<' '<<p.y<<' '<<p.speed;
+        if(p.scale>0.f)req<<' '<<p.scale;
+      }
       if(expression_send(req.str())){d.saving=true;expression_preview_clear();}else expression_status="Could not send expression request";
     }ImGui::EndDisabled();ImGui::SameLine();if(ImGui::Button("Cancel"))expression_editor_close();
 }
@@ -984,7 +996,14 @@ void expressions_popup(const ImVec2& sz,GLFWwindow* window){
             if(type=="X"){std::string flag,group;if(std::getline(in,flag,'\t')){std::getline(in,group);details[key].group=group;details[key].protected_expression=flag=="1";}continue;}
             if(type=="D"){float fi,fo;if(in>>fi>>fo&&std::isfinite(fi)&&std::isfinite(fo)){auto& d=details[key];d.fade=fi;d.fade_out=fo;}continue;}
             if(type=="I"){std::string id;int show;if(in>>id>>show&&parameters::item_id_ok(id)&&(show==0||show==1))details[key].items.push_back({id,show==1});continue;}
-            if(type=="P"){parameters::ModelPosition p;if(in>>p.x>>p.y>>p.speed&&p.valid())details[key].position=p;continue;}
+            if(type=="P"){
+                parameters::ModelPosition p;
+                if(in>>p.x>>p.y>>p.speed){
+                    in>>std::ws;
+                    if((in.eof()||(in>>p.scale&&p.scale>0.f))&&p.valid())details[key].position=p;
+                }
+                continue;
+            }
             if(type=="T"){ExpressionTerm t;if(in>>t.id>>t.blend>>t.value&&std::isfinite(t.value))details[key].terms.push_back(t);continue;}
             if(type=="G"){global_status=key;continue;}
             if(type=="L"){global_local_fallback=key=="1";continue;}
