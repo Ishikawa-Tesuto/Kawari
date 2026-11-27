@@ -23,7 +23,7 @@ public:
     void close_socket() {
         if(fd_>=0) {::close(fd_);fd_=-1;}
         if(!path_.empty()) {::unlink(path_.c_str());path_.clear();}
-        if(!dir_.empty()) {::unlink((dir_+"/parameters.tsv").c_str());::unlink((dir_+"/parameters.tmp").c_str());for(const char* f:{"expression-ui.tsv","expression-request.tsv","expression-request.tmp","expression-result.txt"})::unlink((dir_+"/"+f).c_str());::rmdir(dir_.c_str());dir_.clear();}
+        if(!dir_.empty()) {::unlink((dir_+"/parameters.tsv").c_str());::unlink((dir_+"/parameters.tmp").c_str());for(const char* f:{"expression-ui.tsv","expression-request.tsv","expression-request.tmp","expression-result.txt","obs-ui.tsv","obs-request.tsv","obs-request.tmp"})::unlink((dir_+"/"+f).c_str());::rmdir(dir_.c_str());dir_.clear();}
     }
     bool open_socket() {
         if(fd_>=0) return true;

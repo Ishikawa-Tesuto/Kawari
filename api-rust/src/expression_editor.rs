@@ -2,6 +2,26 @@
 use super::*;
 
 fn item_id_ok(id:&str)->bool{id.len()==12&&id.starts_with("asset-")&&id.as_bytes()[6..].iter().all(u8::is_ascii_alphanumeric)}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct ModelPosition {
+    x: f64,
+    y: f64,
+    speed: f64,
+}
+impl ModelPosition {
+    fn parse(value: &V) -> AnyResult<Self> {
+        let field = |key, lo, hi| {
+            num(&value[key]).filter(|n| (lo..=hi).contains(n))
+                .ok_or_else(|| err(format!("Invalid model position {key}")))
+        };
+        Ok(Self { x: field("X", -10., 10.)?, y: field("Y", -10., 10.)?, speed: field("Speed", 0.05, 20.)? })
+    }
+    pub fn packet(self) -> String {
+        format!(" position P {:.8} {:.8} {:.8}", self.x, self.y, self.speed)
+    }
+}
+
 pub(super) fn parse_asset(name:&str,v:&V)->AnyResult<Asset>{
     if v.get("Type").is_some()&&v["Type"]!="Live2D Expression"{return Err(err("Invalid expression type"))}
     let mut terms=vec![];let mut seen=BTreeSet::new();
@@ -17,10 +37,11 @@ pub(super) fn parse_asset(name:&str,v:&V)->AnyResult<Asset>{
         for row in rows{let id=strv(row,"Id");let show=row["Visible"].as_bool().ok_or_else(||err("Invalid item visibility"))?;
             if !item_id_ok(id)||!seen_items.insert(id){return Err(err("Invalid or duplicate item ID"))}items.push((id.to_owned(),show));}
     }
-    if (terms.is_empty()&&items.is_empty())||terms.len()>256{return Err(err("Select parameters or items"))}
+    let position=v.get("KawariPosition").map(ModelPosition::parse).transpose()?;
+    if (terms.is_empty()&&items.is_empty()&&position.is_none())||terms.len()>256{return Err(err("Select parameters, items or a model position"))}
     let fade=optional(v,"FadeInTime",0.5,0.,10.).ok_or_else(||err("Invalid fade in"))?;
     let fade_out=optional(v,"FadeOutTime",fade,0.,10.).ok_or_else(||err("Invalid fade out"))?;
-    Ok(Asset{key:hash(name),terms,items,fade,fade_out})
+    Ok(Asset{key:hash(name),terms,items,position,fade,fade_out})
 }
 fn path(b:&Bridge)->AnyResult<PathBuf>{
     let p=b.args.state.as_ref().ok_or_else(||err("No writable profile"))?.with_extension("expressions.json");
@@ -54,11 +75,12 @@ pub(super) fn details(b:&Bridge)->String{
         out.push_str(&format!("D\t{}\t{}\t{}\n",a.key,a.fade,a.fade_out));
         for(id,blend,val)in &a.terms{out.push_str(&format!("T\t{}\t{}\t{}\t{}\n",a.key,id,blend,val));}
         for(id,show)in &a.items{out.push_str(&format!("I\t{}\t{}\t{}\n",a.key,id,u8::from(*show)));}
+        if let Some(p)=a.position {out.push_str(&format!("P\t{}\t{}\t{}\t{}\n",a.key,p.x,p.y,p.speed));}
     }out
 }
 pub(super) fn save(b:&mut Bridge,fields:&[&str])->AnyResult<()>{
     // save-expression <new|hash> <name> <fadeIn> <fadeOut> <id> <blend> <value> ...
-    if fields.len()<8||(fields.len()-5)%3!=0||(fields.len()-5)/3>288{return Err(err("Invalid expression request"))}
+    if fields.len()<8||(fields.len()-5)%3!=0||(fields.len()-5)/3>289{return Err(err("Invalid expression request"))}
     let name=if fields[1]=="new"{
         let n=new_file(fields[2])?;if b.expressions.assets.contains_key(&n)||b.expressions.management.removed(&n){return Err(err("Expression name already exists or was retired"))}if b.expressions.assets.len()>=64{return Err(err("Expression limit reached"))}n
     }else{
@@ -66,19 +88,29 @@ pub(super) fn save(b:&mut Bridge,fields:&[&str])->AnyResult<()>{
         if b.expressions.active(&n){return Err(err("Deactivate the expression before editing"))}n
     };
     if !valid_file(&name){return Err(err("Invalid expression filename"))}
-    let mut terms=vec![];let mut items=vec![];
+    let mut terms=vec![];let mut items=vec![];let mut position=None;
     for row in fields[5..].chunks_exact(3){
         let id=row[0];if row[1]=="I"{let show=match row[2]{"1"=>true,"0"=>false,_=>return Err(err("Invalid item visibility"))};items.push(json!({"Id":id,"Visible":show}));continue;}
+        if row[1]=="P" {
+            let values:Vec<_>=row[2].split_ascii_whitespace().collect();
+            let [x,y,speed]=values.as_slice() else{return Err(err("Invalid model position"))};
+            if id!="position"||position.is_some(){return Err(err("Invalid or duplicate model position"))}
+            let values=[x.parse::<f64>()?,y.parse()?,speed.parse()?];
+            if values.iter().any(|n| !n.is_finite()){return Err(err("Invalid model position"))}
+            position=Some(json!({"X":values[0],"Y":values[1],"Speed":values[2]}));
+            continue;
+        }
         if !b.snap.params.contains_key(id){return Err(err("Missing rig parameter"))}
         let blend=match row[1]{"A"=>"Add","M"=>"Multiply","O"=>"Overwrite",_=>return Err(err("Invalid blend"))};
         let value=row[2].parse::<f64>()?;if !value.is_finite()||value.abs()>1e6{return Err(err("Invalid value"))}
         terms.push(json!({"Id":id,"Blend":blend,"Value":value}));
     }
     let fade=fields[3].parse::<f64>()?;let fade_out=fields[4].parse::<f64>()?;
-    let v=json!({"Type":"Live2D Expression","FadeInTime":fade,"FadeOutTime":fade_out,"Parameters":terms,"KawariItems":items});
+    let mut v=json!({"Type":"Live2D Expression","FadeInTime":fade,"FadeOutTime":fade_out,"Parameters":terms,"KawariItems":items});
+    if let Some(p)=position {v["KawariPosition"]=p;}
     let a=parse_asset(&name,&v)?;
     // The native datagram must fit even for a maximally sized draft.
-    if a.terms.iter().map(|(n,_,v)|n.len()+v.to_string().len()+4).sum::<usize>()+a.items.len()*17+100>LIMIT{return Err(err("Expression too large for renderer"))}
+    if a.terms.iter().map(|(n,_,v)|n.len()+v.to_string().len()+4).sum::<usize>()+a.items.len()*17+a.position.map_or(0,|p|p.packet().len())+100>LIMIT{return Err(err("Expression too large for renderer"))}
     let mut entries=catalog(b)?;entries.insert(name.clone(),v);if entries.len()>1024{return Err(err("Expression archive limit reached"))}
     let data=json!({"schema":"kawari-expressions-1","modelID":b.modelid,"expressions":entries});
     if serde_json::to_vec_pretty(&data)?.len()>8*1024*1024-1{return Err(err("Expression archive size limit reached"))}
@@ -90,6 +122,19 @@ pub(super) fn save(b:&mut Bridge,fields:&[&str])->AnyResult<()>{
 mod tests {
     use std::os::unix::fs::DirBuilderExt;
     use super::*;
+    #[test]
+    fn position_only_expression() {
+        let asset = parse_asset("Chat.exp3.json", &json!({
+            "Type": "Live2D Expression",
+            "KawariPosition": {"X": -0.75, "Y": 0.25, "Speed": 0.5}
+        })).unwrap();
+        assert!(asset.terms.is_empty() && asset.items.is_empty());
+        assert_eq!(asset.position.unwrap().packet(), " position P -0.75000000 0.25000000 0.50000000");
+        let old = parse_asset("Smile.exp3.json", &json!({"Parameters":[{"Id":"Smile","Value":1}]})).unwrap();
+        assert!(old.position.is_none());
+        assert!(parse_asset("Invalid.exp3.json", &json!({"KawariPosition":{"X":0,"Y":0,"Speed":0}})).is_err());
+    }
+
     #[test]
     fn valid_names_and_blends(){
         assert_eq!(new_file("Улыбка").unwrap(),"Улыбка.exp3.json");

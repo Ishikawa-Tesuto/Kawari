@@ -13,6 +13,7 @@
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_vulkan.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <string>
 #include <fstream>
@@ -24,7 +25,9 @@
 #include <map>
 #include <iterator>
 #include <chrono>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <time.h>
 
 
@@ -365,7 +368,7 @@ bool expression_open=false,expression_wait=false,global_local_fallback=false;
 std::chrono::steady_clock::time_point expression_poll,expression_sent;
 struct ExpressionTerm {std::string id;char blend='O';float value=0;};
 struct ExpressionItem {std::string id;bool show;};
-struct ExpressionDetail {float fade=.5f,fade_out=.5f;std::vector<ExpressionTerm> terms;std::vector<ExpressionItem> items;std::string group;bool protected_expression=false;};
+struct ExpressionDetail {float fade=.5f,fade_out=.5f;std::vector<ExpressionTerm> terms;std::vector<ExpressionItem> items;parameters::ModelPosition position;std::string group;bool protected_expression=false;};
 std::map<std::string,ExpressionDetail> expression_details;
 struct ExpressionDraft {bool open=false,preview=false,saving=false,selected_only=false;int tab=0;std::string key="new";char name[513]{},search[129]{};ExpressionDetail detail;std::chrono::steady_clock::time_point test_until{};};
 ExpressionDraft expression_draft;
@@ -407,12 +410,16 @@ void expression_editor_draw(){
     if(ImGui::InputFloat("##fade_in",&d.detail.fade,.1f,1.f,"%.2f"))d.detail.fade=std::isfinite(d.detail.fade)?std::max(0.f,std::min(10.f,d.detail.fade)):.5f;
     ImGui::TextUnformatted("Fade out (seconds)");ImGui::SetNextItemWidth(-1);
     if(ImGui::InputFloat("##fade_out",&d.detail.fade_out,.1f,1.f,"%.2f"))d.detail.fade_out=std::isfinite(d.detail.fade_out)?std::max(0.f,std::min(10.f,d.detail.fade_out)):.5f;
-    ImGui::Checkbox("Live preview (instant)",&d.preview);ImGui::EndDisabled();ImGui::SameLine();ImGui::Checkbox("Selected only",&d.selected_only);
+    ImGui::Checkbox("Live preview",&d.preview);ImGui::EndDisabled();ImGui::SameLine();ImGui::Checkbox("Selected only",&d.selected_only);
     if(ImGui::RadioButton("Parameters",d.tab==0)){d.tab=0;d.search[0]=0;}ImGui::SameLine();if(ImGui::RadioButton("Items",d.tab==1)){d.tab=1;d.search[0]=0;}
-    ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##expression_parameter_search",d.tab==0?"Search parameters":"Search items",d.search,sizeof(d.search));
+    ImGui::SameLine();if(ImGui::RadioButton("Position",d.tab==2))d.tab=2;
+    if(d.tab!=2){
+        ImGui::SetNextItemWidth(-1);ImGui::InputTextWithHint("##expression_parameter_search",d.tab==0?"Search parameters":"Search items",d.search,sizeof(d.search));
+    }
     const auto& defs=editor_runtime().definitions();
     auto valid_draft=[&](){
-        if((d.detail.terms.empty()&&d.detail.items.empty())||d.detail.terms.size()>256||d.detail.items.size()>32)return false;
+        if((d.detail.terms.empty()&&d.detail.items.empty()&&!d.detail.position)||
+           (d.detail.position&&!d.detail.position.valid())||d.detail.terms.size()>256||d.detail.items.size()>32)return false;
         if(d.key!="new"&&std::any_of(expression_rows.begin(),expression_rows.end(),[&](const ExpressionRow& r){return !r.hotkey&&r.key==d.key&&r.active;}))return false;
         for(const auto& t:d.detail.terms){if(!std::isfinite(t.value)||std::abs(t.value)>1e6f||std::none_of(defs.begin(),defs.end(),[&](const parameters::Definition& def){return def.id==t.id;}))return false;}
         return true;
@@ -422,7 +429,7 @@ void expression_editor_draw(){
     bool run_test=false;
     if(testing){if(ImGui::Button("Stop transition test")){expression_preview_clear();d.test_until={};testing=false;}}
     else{ImGui::BeginDisabled(!valid||d.saving);run_test=ImGui::Button("Test transition");ImGui::EndDisabled();}
-    if(ImGui::IsItemHovered())ImGui::SetTooltip("Fade in, hold for one second, then fade out. Uses the draft timings.");
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("Preview the draft fades and movement speed. Holds for one second after arrival.");
     const float list_height=std::max(45.f,ImGui::GetContentRegionAvail().y-76.f*ui::scale());
     ImGui::BeginDisabled(testing);
     if(ImGui::BeginChild("##expression_parameters",ImVec2(0,list_height),ImGuiChildFlags_Borders)){
@@ -446,7 +453,7 @@ void expression_editor_draw(){
       // Preserve imported terms missing from a revised rig until explicitly removed.
       for(auto it=d.detail.terms.begin();it!=d.detail.terms.end();){if(std::none_of(defs.begin(),defs.end(),[&](const parameters::Definition& def){return def.id==it->id;})){
           ImGui::PushID(it->id.c_str());ImGui::TextWrapped("Missing: %s",it->id.c_str());if(ImGui::SmallButton("Remove")){it=d.detail.terms.erase(it);ImGui::PopID();continue;}ImGui::PopID();}++it;}
-      }else{
+      }else if(d.tab==1){
         const auto& scene=items::scene();
         if(scene.rows.empty())ImGui::TextDisabled("Import PNG/GIF in Items first.");
         for(const auto& item:scene.rows){
@@ -470,6 +477,24 @@ void expression_editor_draw(){
                 ImGui::PushID(it->id.c_str());ImGui::TextWrapped("Missing item: %s",it->id.c_str());if(ImGui::SmallButton("Remove action")){it=d.detail.items.erase(it);ImGui::PopID();continue;}ImGui::PopID();
             }++it;
         }
+      }else{
+        bool enabled=bool(d.detail.position);
+        if(ImGui::Checkbox("Move model",&enabled)){
+            if(enabled){
+                parameters::ModelPosition p;p.speed=1.f;camera_offset(p.x,p.y);
+                p.x=parameters::clamp(p.x,-10.f,10.f);p.y=parameters::clamp(p.y,-10.f,10.f);
+                d.detail.position=p;
+            }else d.detail.position={};
+        }
+        if(auto& p=d.detail.position){
+            ImGui::DragFloat("X (right)",&p.x,.01f,-10.f,10.f,"%.3f",ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Y (up)",&p.y,.01f,-10.f,10.f,"%.3f",ImGuiSliderFlags_AlwaysClamp);
+            ImGui::DragFloat("Speed (canvas units/s)",&p.speed,.01f,.05f,20.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+            if(ImGui::Button("Use current position")){
+                camera_offset(p.x,p.y);
+                p.x=parameters::clamp(p.x,-10.f,10.f);p.y=parameters::clamp(p.y,-10.f,10.f);
+            }
+        }
       }
     }ImGui::EndChild();ImGui::EndDisabled();
     valid=valid_draft();
@@ -477,10 +502,16 @@ void expression_editor_draw(){
     std::ostringstream terms;terms.imbue(std::locale::classic());terms<<std::setprecision(9);
     for(const auto& t:d.detail.terms)terms<<' '<<t.id<<' '<<t.blend<<' '<<t.value;
     for(const auto& t:d.detail.items)terms<<' '<<t.id<<" I "<<(t.show?1:0);
+    if(const auto& p=d.detail.position)terms<<" position P "<<p.x<<' '<<p.y<<' '<<p.speed;
     if(run_test&&valid){
       d.preview=false;expression_preview_clear();
       const auto fi=std::lround(d.detail.fade*1000.f),fo=std::lround(d.detail.fade_out*1000.f);
-      const auto hold=fi+1000;
+      long travel=0;
+      if(const auto& p=d.detail.position){
+        float x,y;camera_offset(x,y);
+        travel=std::min(86399000L,std::lround(1000.f*std::hypot(p.x-x,p.y-y)/p.speed));
+      }
+      const auto hold=std::max(fi,travel)+1000;
       if(expression_preview("expr on2 editor-preview "+std::to_string(fi)+" "+std::to_string(hold)+" "+std::to_string(fo)+terms.str())){
         d.test_until=std::chrono::steady_clock::now()+std::chrono::milliseconds(hold+fo+50);testing=true;
       }else expression_status="Could not start transition test";
@@ -492,6 +523,7 @@ void expression_editor_draw(){
       std::ostringstream req;req.imbue(std::locale::classic());req<<std::setprecision(9)<<"save-expression\t"<<d.key<<'\t'<<(d.key=="new"?d.name:"")<<'\t'<<d.detail.fade<<'\t'<<d.detail.fade_out;
       for(const auto& t:d.detail.terms)req<<'\t'<<t.id<<'\t'<<t.blend<<'\t'<<t.value;
       for(const auto& t:d.detail.items)req<<'\t'<<t.id<<"\tI\t"<<(t.show?1:0);
+      if(const auto& p=d.detail.position)req<<"\tposition\tP\t"<<p.x<<' '<<p.y<<' '<<p.speed;
       if(expression_send(req.str())){d.saving=true;expression_preview_clear();}else expression_status="Could not send expression request";
     }ImGui::EndDisabled();ImGui::SameLine();if(ImGui::Button("Cancel"))expression_editor_close();
 }
@@ -693,7 +725,7 @@ struct TwitchUi {
     std::chrono::steady_clock::time_point next{};
 };
 TwitchUi twitch_ui;
-std::vector<std::string> twitch_fields(const std::string& line){std::vector<std::string> v;size_t pos=0;for(;;){auto end=line.find('\t',pos);v.push_back(line.substr(pos,end-pos));if(end==std::string::npos)break;pos=end+1;}return v;}
+std::vector<std::string> integration_fields(const std::string& line){std::vector<std::string> v;size_t pos=0;for(;;){auto end=line.find('\t',pos);v.push_back(line.substr(pos,end-pos));if(end==std::string::npos)break;pos=end+1;}return v;}
 void twitch_panel(){
     auto& t=twitch_ui;const auto dir=library_dir();
     if(dir!=t.dir){t=TwitchUi{};t.dir=dir;}
@@ -703,7 +735,7 @@ void twitch_panel(){
         if(t.ready){t.rewards.clear();t.expressions.clear();t.code.clear();t.url.clear();t.model.clear();t.modelName.clear();t.login.clear();t.enabled=false;
             t.codeRemaining.clear();t.retryRemaining.clear();t.localNote.clear();t.approvalBlocked=false;
             bool localReported=false;
-            while(std::getline(f,line)){auto v=twitch_fields(line);if(v.empty())continue;
+            while(std::getline(f,line)){auto v=integration_fields(line);if(v.empty())continue;
                 if(v[0]=="S"&&v.size()==3){t.status=v[1];t.note=v[2];}
                 else if(v[0]=="C"&&v.size()==4){if(!t.clientInitialized){if(!v[1].empty())std::snprintf(t.client,sizeof(t.client),"%s",v[1].c_str());t.clientInitialized=true;}t.login=v[2];t.enabled=v[3]=="1";}
                 else if(v[0]=="D"&&v.size()==3){t.code=v[1];t.url=v[2];}
@@ -777,6 +809,133 @@ void twitch_panel(){
       if(!saved_known)ImGui::TextDisabled("Missing expression - remove or change binding");
     }
 }
+
+struct ObsRule {
+    std::string expression;
+    int delay;
+};
+struct ObsUi {
+    std::string dir,status,program,notice,scene,expression,request_error;
+    std::vector<std::string> scenes;
+    std::vector<std::pair<std::string,std::string>> expressions;
+    std::map<std::string,ObsRule> rules;
+    char password[513]{};
+    int port=4455, delay=0;
+    bool ready=false, enabled=false, password_saved=false, port_loaded=false;
+    std::chrono::steady_clock::time_point next{};
+};
+ObsUi obs_ui;
+
+void obs_panel(const std::string& dir){
+    auto& obs=obs_ui;
+    if(dir!=obs.dir){obs=ObsUi{};obs.dir=dir;}
+    const auto now=std::chrono::steady_clock::now();
+    if(!dir.empty()&&now>=obs.next){
+        obs.next=now+std::chrono::milliseconds(200);
+        std::ifstream file(dir+"/obs-ui.tsv");
+        std::string line;
+        obs.ready=bool(std::getline(file,line))&&line=="kawari-obs-1";
+        if(obs.ready){
+            obs.scenes.clear();obs.expressions.clear();obs.rules.clear();obs.notice.clear();
+            while(std::getline(file,line)){
+                const auto fields=integration_fields(line);
+                if(fields[0]=="S"&&fields.size()==3){obs.status=fields[1];obs.program=fields[2];}
+                else if(fields[0]=="C"&&fields.size()==4){
+                    if(!obs.port_loaded){obs.port=std::atoi(fields[1].c_str());obs.port_loaded=true;}
+                    obs.enabled=fields[2]=="1";obs.password_saved=fields[3]=="1";
+                }
+                else if(fields[0]=="M"&&fields.size()==2)obs.notice=fields[1];
+                else if(fields[0]=="N"&&fields.size()==2)obs.scenes.push_back(fields[1]);
+                else if(fields[0]=="E"&&fields.size()==3)obs.expressions.emplace_back(fields[1],fields[2]);
+                else if(fields[0]=="R"&&fields.size()==4){
+                    obs.rules.emplace(fields[1],ObsRule{fields[2],std::atoi(fields[3].c_str())});
+                    obs.scenes.push_back(fields[1]);
+                }
+            }
+            if(!obs.program.empty())obs.scenes.push_back(obs.program);
+            std::sort(obs.scenes.begin(),obs.scenes.end());
+            obs.scenes.erase(std::unique(obs.scenes.begin(),obs.scenes.end()),obs.scenes.end());
+        }
+    }
+    if(!obs.ready){ImGui::TextDisabled("Waiting for Kawari API");return;}
+    auto request=[&](const std::string& data){
+        const auto base=dir+"/obs-request";
+        if(std::ifstream(base+".tsv")){obs.request_error="Previous command pending";return false;}
+        const auto temporary=base+".tmp";
+        const auto fd=open(temporary.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
+        if(fd<0){obs.request_error="Cannot send OBS command";return false;}
+        const bool written=write(fd,data.data(),data.size())==static_cast<ssize_t>(data.size());
+        const bool closed=close(fd)==0;
+        if(!written||!closed||std::rename(temporary.c_str(),(base+".tsv").c_str())!=0){
+            std::remove(temporary.c_str());
+            obs.request_error="Cannot send OBS command";
+            return false;
+        }
+        obs.request_error.clear();
+        return true;
+    };
+    ImGui::TextUnformatted(obs.status.c_str());
+    ImGui::InputInt("Port",&obs.port,0);
+    obs.port=std::max(1,std::min(65535,obs.port));
+    ImGui::InputTextWithHint("Password",obs.password_saved?"Password saved":"OBS WebSocket password",
+                            obs.password,sizeof(obs.password),ImGuiInputTextFlags_Password);
+    if(ImGui::Button(obs.enabled?"Reconnect":"Connect")&&request("connect\t"+std::to_string(obs.port)+"\t"+obs.password))
+        std::fill(std::begin(obs.password),std::end(obs.password),0);
+    if(obs.enabled){ImGui::SameLine();if(ImGui::Button("Disconnect"))request("disconnect");}
+    if(!obs.notice.empty())ImGui::TextWrapped("%s",obs.notice.c_str());
+    if(!obs.request_error.empty())ImGui::TextWrapped("%s",obs.request_error.c_str());
+
+    ImGui::Separator();
+    if(!obs.program.empty())ImGui::TextWrapped("Program scene: %s",obs.program.c_str());
+    if(obs.scenes.empty()){ImGui::TextDisabled("Connect to OBS to load scenes.");return;}
+    auto select_scene=[&](const std::string& scene){
+        obs.scene=scene;
+        const auto saved=obs.rules.find(scene);
+        obs.expression=saved==obs.rules.end()?"":saved->second.expression;
+        obs.delay=saved==obs.rules.end()?0:saved->second.delay;
+    };
+    if(!std::binary_search(obs.scenes.begin(),obs.scenes.end(),obs.scene))
+        select_scene(obs.program.empty()?obs.scenes.front():obs.program);
+    if(ImGui::BeginCombo("Scene",obs.scene.c_str())){
+        for(const auto& scene:obs.scenes){
+            ImGui::PushID(scene.c_str());
+            if(ImGui::Selectable((scene+"###obs_scene").c_str(),obs.scene==scene))select_scene(scene);
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    const auto selected=std::find_if(obs.expressions.begin(),obs.expressions.end(),[&](const std::pair<std::string,std::string>& expression){
+        return expression.first==obs.expression;
+    });
+    if(ImGui::BeginCombo("Expression",selected==obs.expressions.end()?"Choose an expression":selected->second.c_str())){
+        for(const auto& entry:obs.expressions){
+            ImGui::PushID(entry.first.c_str());
+            if(ImGui::Selectable((entry.second+"###obs_expression").c_str(),entry.first==obs.expression))obs.expression=entry.first;
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    if(obs.expressions.empty())ImGui::TextDisabled("Add a position to an expression first.");
+    ImGui::InputInt("Delay (ms)",&obs.delay,50,250);
+    obs.delay=std::max(0,std::min(30000,obs.delay));
+    ImGui::SetItemTooltip("Time from the start of the OBS transition.");
+    ImGui::BeginDisabled(selected==obs.expressions.end());
+    if(ImGui::Button("Save binding"))
+        request("bind\t"+obs.scene+"\t"+obs.expression+"\t"+std::to_string(obs.delay));
+    ImGui::EndDisabled();
+    const auto saved=obs.rules.find(obs.scene);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(saved==obs.rules.end());
+    if(ImGui::Button("Remove binding")&&request("unbind\t"+obs.scene)){obs.expression.clear();obs.delay=0;}
+    ImGui::EndDisabled();
+    if(saved!=obs.rules.end()){
+        const auto expression=std::find_if(obs.expressions.begin(),obs.expressions.end(),[&](const std::pair<std::string,std::string>& e){
+            return e.first==saved->second.expression;
+        });
+        if(expression==obs.expressions.end())ImGui::TextDisabled("Saved expression has no position or is missing.");
+        else ImGui::TextWrapped("Saved: %s (%d ms)",expression->second.c_str(),saved->second.delay);
+    }
+}
 void plugins_popup(const ImVec2& sz){
     const auto dir=expression_ui_directory();
     if(dir!=plugins_dir){plugins_dir=dir;plugins_status.clear();plugin_rows.clear();plugin_ready=false;plugin_poll={};}
@@ -808,6 +967,9 @@ void plugins_popup(const ImVec2& sz){
         if(ImGui::BeginTabItem(ui::tr("Twitch###twitch","Twitch###twitch"))){
             twitch_panel();
             ImGui::EndTabItem();}
+        if(ImGui::BeginTabItem("OBS###obs")){
+            obs_panel(dir);
+            ImGui::EndTabItem();}
         ImGui::EndTabBar();}
     }ImGui::End();
 }
@@ -822,6 +984,7 @@ void expressions_popup(const ImVec2& sz,GLFWwindow* window){
             if(type=="X"){std::string flag,group;if(std::getline(in,flag,'\t')){std::getline(in,group);details[key].group=group;details[key].protected_expression=flag=="1";}continue;}
             if(type=="D"){float fi,fo;if(in>>fi>>fo&&std::isfinite(fi)&&std::isfinite(fo)){auto& d=details[key];d.fade=fi;d.fade_out=fo;}continue;}
             if(type=="I"){std::string id;int show;if(in>>id>>show&&parameters::item_id_ok(id)&&(show==0||show==1))details[key].items.push_back({id,show==1});continue;}
+            if(type=="P"){parameters::ModelPosition p;if(in>>p.x>>p.y>>p.speed&&p.valid())details[key].position=p;continue;}
             if(type=="T"){ExpressionTerm t;if(in>>t.id>>t.blend>>t.value&&std::isfinite(t.value))details[key].terms.push_back(t);continue;}
             if(type=="G"){global_status=key;continue;}
             if(type=="L"){global_local_fallback=key=="1";continue;}

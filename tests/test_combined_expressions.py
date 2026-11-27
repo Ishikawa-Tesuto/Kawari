@@ -47,6 +47,49 @@ int main(){
             p=Path(d);(p/'test.cpp').write_text(code)
             subprocess.run(['c++','-std=c++11','-Wall','-Wextra','-Werror','-I',str(ROOT/'native'),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
             subprocess.run([str(p/'test')],check=True)
+    def test_model_position_transitions(self):
+        code=r'''
+#include "studio_parameters.hpp"
+#include <cassert>
+using namespace studio::parameters;
+int main(){
+    Runtime runtime;
+    runtime.reset({{"Smile",0,1,0}});
+    PositionMotion motion;
+    const auto time=Clock::now();
+    const auto later=time+std::chrono::milliseconds(200);
+    auto near=[](float a,float b){assert(std::abs(a-b)<.001f);};
+
+    assert(runtime.ingest("expr on position-only 0 0 position P 0.6 0.8 1",time));
+    motion.advance(.1f,0,0,runtime.model_position(time));
+    near(motion.x,.06f);near(motion.y,.08f);
+    assert(runtime.ingest("expr on2 timed 500 200 500 Smile O 1 position P 0.66 0.08 2",time));
+    motion.advance(.1f,0,0,runtime.model_position(time));
+    near(motion.x,.26f);near(motion.y,.08f);
+    assert(runtime.model_position(later)->x==.6f);
+
+    assert(runtime.ingest("expr on obs-position 0 0 position P 0.26 -0.42 1",later));
+    motion.advance(.1f,0,0,runtime.model_position(later));
+    near(motion.x,.26f);near(motion.y,-.02f);
+    assert(runtime.ingest("expr off obs-position",later));
+    assert(runtime.model_position(later)->x==.6f);
+    assert(runtime.ingest("expr off position-only",later));
+    assert(runtime.model_position(later)==nullptr);
+    const float distance=std::hypot(motion.x,motion.y);
+    motion.advance(.1f,0,0,runtime.model_position(later));
+    near(std::hypot(motion.x,motion.y),distance-.1f);
+    for(int i=0;i<50;++i)motion.advance(.01f,0,0,runtime.model_position(later));
+    assert(!motion.active);near(motion.x,0);near(motion.y,0);
+
+    assert(!runtime.ingest("expr on bad 0 0 position P 0 0 0",time));
+    assert(!runtime.ingest("expr on bad 0 0 position P 12 0 1",time));
+    assert(!runtime.ingest("expr on obs-position 0 0 Smile O 1 position P 0 0 1",time));
+}
+'''
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);(p/'test.cpp').write_text(code)
+            subprocess.run(['c++','-std=c++11','-Wall','-Wextra','-Werror','-I',str(ROOT/'native'),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
+            subprocess.run([str(p/'test')],check=True)
     def test_protocol_and_compositor(self):
         api=(ROOT/'api-rust/src/main.rs').read_text()
         editor=(ROOT/'api-rust/src/expression_editor.rs').read_text()

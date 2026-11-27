@@ -24,6 +24,7 @@ using Clock = std::chrono::steady_clock;
 Clock::time_point frame_start;
 int selected = 0;
 float zoom = 1.f, pan_x = 0.f, pan_y = 0.f;
+parameters::PositionMotion position_motion;
 float zoom_target = 1.f, anchor_x = 0.f, anchor_y = 0.f;
 Clock::time_point view_tick{};
 constexpr float min_zoom=.2f, max_zoom=5.f;
@@ -120,9 +121,12 @@ bool demo_visible() { return show_demo; }
 float background() { return show_demo ? 0.f : backgrounds[bg_index]; }
 int window_width(int fallback) { return dimension("STUDIO_WIDTH",fallback); }
 int window_height(int fallback) { return dimension("STUDIO_HEIGHT",fallback); }
-bool camera_is_default() { return zoom==1.f && zoom_target==1.f && pan_x==0.f && pan_y==0.f; }
+bool camera_is_default() {
+    float x,y;camera_offset(x,y);
+    return zoom==1.f && zoom_target==1.f && x==0.f && y==0.f;
+}
 float camera_scale() { return zoom; }
-void camera_offset(float& x,float& y){x=pan_x;y=pan_y;}
+void camera_offset(float& x,float& y){x=position_motion.active?position_motion.x:pan_x;y=position_motion.active?position_motion.y:pan_y;}
 void camera_zoom(float factor) {
     if(!std::isfinite(factor)||factor<=0)return;
     zoom=zoom_target=limit_zoom(zoom*factor);
@@ -155,12 +159,15 @@ void camera_pan(float x,float y) {
 void camera_reset() { zoom=zoom_target=1;pan_x=pan_y=anchor_x=anchor_y=0;view_tick={}; }
 void cycle_background() { show_demo=false;bg_index=(bg_index+1)%4; }
 void apply_camera(float* m) {
+    float x,y;camera_offset(x,y);
     // Clip-space affine transform: scale XY, then translate by W.
-    for (int i=0;i<16;i+=4) { m[i]=zoom*m[i]+pan_x*m[i+3]; m[i+1]=zoom*m[i+1]+pan_y*m[i+3]; }
+    for (int i=0;i<16;i+=4) { m[i]=zoom*m[i]+x*m[i+3]; m[i+1]=zoom*m[i+1]+y*m[i+3]; }
 }
 void update_view(GLFWwindow* w) {
     const auto now=Clock::now();
-    if(view_tick!=Clock::time_point{})camera_advance(std::chrono::duration<float>(now-view_tick).count());
+    const float dt=view_tick==Clock::time_point{}?0.f:std::chrono::duration<float>(now-view_tick).count();
+    camera_advance(dt);
+    position_motion.advance(dt,pan_x,pan_y,parameter_runtime.model_position(now));
     view_tick=now;
     constexpr int actions[]={GLFW_KEY_EQUAL,GLFW_KEY_MINUS,GLFW_KEY_HOME,GLFW_KEY_B,GLFW_KEY_F2,GLFW_KEY_F3,GLFW_KEY_W,GLFW_KEY_A,GLFW_KEY_S,GLFW_KEY_D,GLFW_KEY_ESCAPE};
     static bool last[sizeof(actions)/sizeof(actions[0])]{};
@@ -243,7 +250,7 @@ void commit_model_selection(const ModelSelection& selection){
     parameter_socket.close_socket();reset_controls();selection_committed=true;active_selection()=selection;
     camera_reset();invalid_packets=0;
 }
-void reset_controls() { editor_release();editor_current.clear();editor_changed=false;editor_map_valid=false; selected = 0; initialized = false; overrides.clear(); previous.fill(false); parameter_runtime.reset({}); parameter_socket.drain([](const std::string&){}); }
+void reset_controls() { editor_release();editor_current.clear();editor_changed=false;editor_map_valid=false; selected = 0; initialized = false; overrides.clear(); previous.fill(false); position_motion={}; parameter_runtime.reset({}); parameter_socket.drain([](const std::string&){}); }
 void update_controls(Model* m, GLFWwindow* w) {
     if (!m) return;
     std::array<bool, keys.size()> pressed{};

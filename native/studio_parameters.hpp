@@ -70,6 +70,27 @@ inline bool item_id_ok(const std::string& id) {
     for(size_t i=6;i<id.size();++i){char c=id[i];if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')))return false;}
     return true;
 }
+struct ModelPosition {
+    float x=0, y=0, speed=0;
+    explicit operator bool() const {return speed!=0.f;}
+    bool valid() const {
+        return std::isfinite(x)&&std::isfinite(y)&&std::isfinite(speed)&&
+               std::abs(x)<=10.f&&std::abs(y)<=10.f&&speed>=.05f&&speed<=20.f;
+    }
+};
+struct PositionMotion {
+    float x=0, y=0, speed=1;
+    bool active=false;
+    void advance(float dt, float base_x, float base_y, const ModelPosition* target) {
+        if (!active) {x=base_x;y=base_y;}
+        if (target) {active=true;speed=target->speed;}
+        if (!active||!std::isfinite(dt)||dt<=0.f) return;
+        const float to_x=target?target->x:base_x,to_y=target?target->y:base_y;
+        const float dx=to_x-x,dy=to_y-y,distance=std::hypot(dx,dy),step=speed*std::min(dt,.1f);
+        if (distance<=step) {x=to_x;y=to_y;active=target!=nullptr;}
+        else {x+=dx*(step/distance);y+=dy*(step/distance);}
+    }
+};
 class Runtime {
     std::vector<Definition> definitions_;
     std::vector<Mapping> maps_;
@@ -77,7 +98,9 @@ class Runtime {
     struct Term { size_t target; char blend; float value; };
     struct ItemTerm {std::string id; float visibility;};
     struct Expression {
-        std::string key; std::vector<Term> terms; std::vector<ItemTerm> items; float weight=0, start=0, goal=1;
+        std::string key; std::vector<Term> terms; std::vector<ItemTerm> items;
+        ModelPosition position;
+        float weight=0, start=0, goal=1;
         int fade_ms=0, fade_out_ms=0; Clock::time_point changed, deadline=Clock::time_point::max();
     };
     std::vector<Expression> expressions_;
@@ -104,6 +127,11 @@ class Runtime {
         std::string name;char blend;float value;
         while(row>>name) {
             if(!(row>>blend>>value)||!std::isfinite(value)||std::abs(value)>1e6f) return false;
+            if(blend=='P') {
+                ModelPosition p;p.x=value;
+                if(name!="position"||e.position||!(row>>p.y>>p.speed)||!p.valid())return false;
+                e.position=p;continue;
+            }
             if(blend=='I') {
                 if(!item_id_ok(name)||(value!=0.f&&value!=1.f)||e.items.size()>=32||std::any_of(e.items.begin(),e.items.end(),[&](const ItemTerm& t){return t.id==name;}))return false;
                 e.items.push_back({name,value});continue;
@@ -113,15 +141,21 @@ class Runtime {
             if(i==definitions_.size()||std::any_of(e.terms.begin(),e.terms.end(),[&](const Term& t){return t.target==i;}))return false;
             e.terms.push_back({i,blend,value});
         }
-        if(e.terms.empty()&&e.items.empty())return false;
+        if(e.terms.empty()&&e.items.empty()&&!e.position)return false;
+        if(key=="obs-position"&&(!e.position||!e.terms.empty()||!e.items.empty()))return false;
         if(it!=expressions_.end()) {e.start=weight_at(*it,now);expressions_.erase(it);}
-        else if(key!="editor-preview"&&std::count_if(expressions_.begin(),expressions_.end(),[](const Expression& a){return a.key!="editor-preview";})>=64)return false;
+        else if(key!="editor-preview"&&key!="obs-position"&&std::count_if(expressions_.begin(),expressions_.end(),[](const Expression& a){return a.key!="editor-preview"&&a.key!="obs-position";})>=64)return false;
         expressions_.push_back(std::move(e));
         return true;
     }
     static int source(const std::string& s) { return s=="tracking"?0:s=="plugin"?1:s=="test"?2:-1; }
 public:
     void clear_expression_preview(){expressions_.erase(std::remove_if(expressions_.begin(),expressions_.end(),[](const Expression& e){return e.key=="editor-preview";}),expressions_.end());}
+    const ModelPosition* model_position(Clock::time_point now) const {
+        for(auto it=expressions_.rbegin();it!=expressions_.rend();++it)
+            if(it->position&&it->goal>0&&it->deadline>now)return &it->position;
+        return nullptr;
+    }
     // Use the same envelope and activation order for the image compositor.
     // Evaluate on a copy so a render query cannot mutate runtime or saved scene.
     float item_visibility(const std::string& id,bool base,Clock::time_point now) const {

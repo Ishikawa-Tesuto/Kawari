@@ -340,6 +340,7 @@ dependencies = [
 name = "studio-vts-api"
 version = "0.4.0-alpha.2"
 dependencies = [
+ "data-encoding",
  "libc",
  "serde_json",
  "sha2",
