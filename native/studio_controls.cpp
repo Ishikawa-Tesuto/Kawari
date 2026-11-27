@@ -48,7 +48,20 @@ int frame_limit=[] { const char* s=std::getenv("STUDIO_FPS"); const int n=s?std:
 Clock::time_point stats_start = Clock::now();
 std::clock_t cpu_start = std::clock();
 unsigned frames=0;
-double work_ms=0, measured_fps=0;
+double work_ms=0, peak_work_ms=0, measured_fps=0;
+constexpr size_t phase_count=static_cast<size_t>(FramePhase::Count);
+std::array<double,phase_count> frame_phases{},total_phases{},peak_phases{};
+unsigned preview_frames=0;
+
+void reset_perf_sample(Clock::time_point now,std::clock_t cpu_now){
+    frames=preview_frames=0;
+    work_ms=peak_work_ms=0;
+    frame_phases.fill(0);
+    total_phases.fill(0);
+    peak_phases.fill(0);
+    stats_start=now;
+    cpu_start=cpu_now;
+}
 int dimension(const char* key, int fallback) {
     const char* value = std::getenv(key);
     if (!value) return fallback;
@@ -315,7 +328,7 @@ void update_view(GLFWwindow* w) {
     if (press[2]) camera_reset();
     if (press[3]) {show_demo=false;bg_index=(bg_index+1)%4;}
     if (press[4] && !ui_requested()) show_demo=!show_demo;
-    if (press[5]) {stats=!stats;frames=0;work_ms=0;stats_start=Clock::now();cpu_start=std::clock();}
+    if (press[5]) {stats=!stats;reset_perf_sample(Clock::now(),std::clock());}
     if (press[6]) camera_pan(0,.08f);
     if (press[7]) camera_pan(-.08f,0);
     if (press[8]) camera_pan(0,-.08f);
@@ -462,13 +475,23 @@ void apply_manual_overrides(Model* m) {
     }
     publish_parameters(m);
 }
+FramePhaseTimer::FramePhaseTimer(FramePhase phase)
+    : phase(phase),start(stats?Clock::now():Clock::time_point{}) {}
+FramePhaseTimer::~FramePhaseTimer(){
+    if(start!=Clock::time_point{})
+        frame_phases[static_cast<size_t>(phase)]+=std::chrono::duration<double,std::milli>(Clock::now()-start).count();
+}
 void begin_frame() {
     frame_start = Clock::now();
-    if (frames==0) { stats_start=frame_start;cpu_start=std::clock(); }
+    if(stats){
+        frame_phases.fill(0);
+        if(frames==0){stats_start=frame_start;cpu_start=std::clock();}
+    }
 }
-void apply_live_broadcast_settings(int fps,bool show_stats){
+void apply_live_broadcast_settings(int fps,bool show_stats,bool pause_preview){
     if(fps==0||fps==30||fps==60||fps==120||fps==144)frame_limit=fps;
-    if(stats!=show_stats){stats=show_stats;frames=0;work_ms=0;stats_start=Clock::now();cpu_start=std::clock();}
+    pause_unfocused_preview()=pause_preview;
+    if(stats!=show_stats){stats=show_stats;reset_perf_sample(Clock::now(),std::clock());}
 }
 void pace_frame() {
     // The supervisor publishes live settings even when the WSI/UI is hidden.
@@ -480,8 +503,10 @@ void pace_frame() {
     if(!settings_dir.empty()&&now_poll>=next_poll){
         next_poll=now_poll+std::chrono::milliseconds(150);
         std::ifstream f(settings_dir+"/broadcast-current.tsv");UiBroadcast v;
-        if(f&&ui_read_broadcast(f,v)&&(!seen||v.fps!=last_settings.fps||v.stats!=last_settings.stats)){
-            apply_live_broadcast_settings(v.fps,v.stats);last_settings=v;seen=true;
+        if(f&&ui_read_broadcast(f,v)&&(!seen||v.fps!=last_settings.fps||v.stats!=last_settings.stats||
+                                      v.pause_unfocused_preview!=last_settings.pause_unfocused_preview)){
+            apply_live_broadcast_settings(v.fps,v.stats,v.pause_unfocused_preview);
+            last_settings=v;seen=true;
         }
     }
     const int fps=frame_limit;
@@ -491,7 +516,14 @@ void pace_frame() {
     if (effective_fps) std::this_thread::sleep_until(frame_start + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0/effective_fps)));
     if (!stats) return;
     ++frames;
-    work_ms+=std::chrono::duration<double,std::milli>(before_pace-frame_start).count();
+    const double frame_ms=std::chrono::duration<double,std::milli>(before_pace-frame_start).count();
+    work_ms+=frame_ms;
+    peak_work_ms=std::max(peak_work_ms,frame_ms);
+    if(frame_phases[static_cast<size_t>(FramePhase::Preview)]>0)++preview_frames;
+    for(size_t i=0;i<phase_count;++i){
+        total_phases[i]+=frame_phases[i];
+        peak_phases[i]=std::max(peak_phases[i],frame_phases[i]);
+    }
     const auto now=Clock::now();
     const double elapsed=std::chrono::duration<double>(now-stats_start).count();
     if (elapsed>=1.0) {
@@ -499,7 +531,14 @@ void pace_frame() {
         measured_fps=frames/elapsed;
         const double cpu_percent=100.0*(cpu_now-cpu_start)/CLOCKS_PER_SEC/elapsed;
         std::fprintf(stdout,"[perf] %.1f FPS | work/wait %.2f ms | CPU %.1f%% (one core=100%%) | RSS %.1f MiB | %s\n",measured_fps,work_ms/frames,cpu_percent,rss_mib(),background_frame()?"background":(offscreen()?"offscreen":"direct"));
-        std::fflush(stdout);frames=0;work_ms=0;stats_start=now;cpu_start=cpu_now;
+        const char* labels[]={"acquire","model","items","PipeWire","preview"};
+        static_assert(sizeof(labels)/sizeof(*labels)==phase_count,"Phase labels must match FramePhase");
+        std::fprintf(stdout,"[perf-phases] avg/max ms");
+        for(size_t i=0;i<phase_count;++i)
+            std::fprintf(stdout," | %s %.2f/%.2f",labels[i],total_phases[i]/frames,peak_phases[i]);
+        std::fprintf(stdout," | peak frame %.2f ms | preview %u/%u frames\n",peak_work_ms,preview_frames,frames);
+        std::fflush(stdout);
+        reset_perf_sample(now,cpu_now);
     }
 }
 }

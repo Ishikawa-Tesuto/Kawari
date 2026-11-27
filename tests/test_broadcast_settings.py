@@ -13,7 +13,7 @@ ROOT=Path(__file__).resolve().parents[1]
 BIN=ROOT/'api-rust/target/release/studio'
 API=BIN.with_name('studio-vts-api')
 DEFAULT='kawari-broadcast-1\n1920 1080 60 60 1024 1 0 0\n'
-SAVED='kawari-broadcast-1\n1280 720 120 30 512 2 1 1\n'
+SAVED='kawari-broadcast-2\n1280 720 120 30 512 2 1 1 1\n'
 
 class WireFormat(unittest.TestCase):
     def test_cpp_wire_format(self):
@@ -28,7 +28,12 @@ int main(){
     assert(ui_read_broadcast(in,s)&&s.valid()&&s.width==1280&&s.height==720&&s.fps==120&&s.bfps==30&&s.mask==512&&s.ssaa==2&&s.no_preview&&s.stats);
     assert(s.restart_diff(d));
     auto t=d;t.fps=120;t.stats=true;assert(!t.restart_diff(d)&&!(t==d));
-    for(const char* text:{"kawari-broadcast-1 319 720 60 60 1024 1 0 0","kawari-broadcast-1 7680 4320 60 60 1024 2 0 0","kawari-broadcast-1 1280 720 61 60 1024 1 0 0","kawari-broadcast-1 1280 720 60 60 1024 1 2 0","kawari-broadcast-1 1280 720 60 60 1024 1 0 0 extra","kawari-broadcast-2 1280 720 60 60 1024 1 0 0"}){
+    t.pause_unfocused_preview=true;
+    const auto changed=ui_write_broadcast(t);
+    assert(changed=="kawari-broadcast-2\n1920 1080 120 60 1024 1 0 1 1\n");
+    std::istringstream updated(changed);
+    assert(ui_read_broadcast(updated,s)&&s==t&&!s.restart_diff(d));
+    for(const char* text:{"kawari-broadcast-1 319 720 60 60 1024 1 0 0","kawari-broadcast-1 7680 4320 60 60 1024 2 0 0","kawari-broadcast-1 1280 720 61 60 1024 1 0 0","kawari-broadcast-1 1280 720 60 60 1024 1 2 0","kawari-broadcast-1 1280 720 60 60 1024 1 0 0 extra","kawari-broadcast-2 1280 720 60 60 1024 1 0 0","kawari-broadcast-2 1280 720 60 60 1024 1 0 0 2"}){
         auto old=s;std::istringstream bad(text);assert(!ui_read_broadcast(bad,s)&&s==old);
     }
 }
@@ -50,7 +55,7 @@ from pathlib import Path
 p=Path(tempfile.mkdtemp(prefix='ipc-',dir=os.environ['TMPDIR']))
 s=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM);s.bind(str(p/'input.sock'))
 (p/'parameters.tsv').write_text('P\\tParamX\\t-1\\t1\\t0\\t0\\n')
-Path(os.environ['TEST_INFO']).write_text(json.dumps(dict(pid=os.getpid(),mail=os.environ['STUDIO_LIBRARY_DIR'],settings=[os.environ[x] for x in ('STUDIO_BROADCAST_WIDTH','STUDIO_BROADCAST_HEIGHT','STUDIO_FPS','STUDIO_BROADCAST_FPS','STUDIO_MASK_SIZE','STUDIO_SSAA','STUDIO_NO_PREVIEW','STUDIO_STATS')]))) 
+Path(os.environ['TEST_INFO']).write_text(json.dumps(dict(pid=os.getpid(),mail=os.environ['STUDIO_LIBRARY_DIR'],settings=[os.environ[x] for x in ('STUDIO_BROADCAST_WIDTH','STUDIO_BROADCAST_HEIGHT','STUDIO_FPS','STUDIO_BROADCAST_FPS','STUDIO_MASK_SIZE','STUDIO_SSAA','STUDIO_NO_PREVIEW','STUDIO_STATS','STUDIO_PAUSE_UNFOCUSED_PREVIEW')])))
 print('[parameters] socket: '+str(p/'input.sock'),flush=True)
 while True:
     (p/'parameters.tsv').touch()
@@ -83,13 +88,13 @@ while True:
                     tmp=mail/'broadcast-save.tmp';tmp.write_text(text);tmp.rename(mail/'broadcast-save.tsv')
                     wait(child,result.exists);return result.read_text()
                 self.assertEqual(request(SAVED),'ok');self.assertEqual(config.read_text(),SAVED)
-                self.assertEqual((mail/'broadcast-current.tsv').read_text(),'kawari-broadcast-1\n1920 1080 120 60 1024 1 0 1\n')
+                self.assertEqual((mail/'broadcast-current.tsv').read_text(),'kawari-broadcast-2\n1920 1080 120 60 1024 1 0 1 1\n')
                 self.assertEqual(config.stat().st_mode&0o777,0o600)
                 self.assertTrue(request('invalid').startswith('error:'));self.assertEqual(config.read_text(),SAVED)
                 self.assertEqual(data['pid'],json.loads(info.read_text())['pid']);os.kill(data['pid'],0)
             launch([],first)
-            launch([],lambda child,data,mail:self.assertEqual(data['settings'],['1280','720','120','30','512','2','1','1']))
-            launch(['--preview','--no-stats','--broadcast-size','1920x1080','--fps','60','--mask-size','1024'],lambda child,data,mail:self.assertEqual(data['settings'],['1920','1080','60','30','1024','2','0','0']))
+            launch([],lambda child,data,mail:self.assertEqual(data['settings'],['1280','720','120','30','512','2','1','1','1']))
+            launch(['--preview','--keep-unfocused-preview','--no-stats','--broadcast-size','1920x1080','--fps','60','--mask-size','1024'],lambda child,data,mail:self.assertEqual(data['settings'],['1920','1080','60','30','1024','2','0','0','0']))
             self.assertEqual(config.read_text(),SAVED)
 
 if __name__=='__main__':unittest.main()

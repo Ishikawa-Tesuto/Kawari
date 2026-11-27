@@ -126,7 +126,7 @@ inline std::string shortcut_label(unsigned chord) {
 // Wire format shared with the Rust supervisor. No model-specific state here.
 struct UiBroadcast {
     int width=1920,height=1080,fps=60,bfps=60,mask=1024,ssaa=1;
-    bool no_preview=false,stats=false;
+    bool no_preview=false,stats=false,pause_unfocused_preview=false;
     bool valid()const{
         return width>=320&&width<=7680&&height>=320&&height<=7680&&
             (fps==0||fps==30||fps==60||fps==120||fps==144)&&
@@ -134,16 +134,25 @@ struct UiBroadcast {
             (mask==256||mask==512||mask==1024||mask==2048)&&
             (ssaa==1||(ssaa==2&&width<=3840&&height<=3840));
     }
-    bool operator==(const UiBroadcast& b)const{return width==b.width&&height==b.height&&fps==b.fps&&bfps==b.bfps&&mask==b.mask&&ssaa==b.ssaa&&no_preview==b.no_preview&&stats==b.stats;}
+    bool operator==(const UiBroadcast& b)const{return width==b.width&&height==b.height&&fps==b.fps&&bfps==b.bfps&&mask==b.mask&&ssaa==b.ssaa&&no_preview==b.no_preview&&stats==b.stats&&pause_unfocused_preview==b.pause_unfocused_preview;}
     bool restart_diff(const UiBroadcast& b)const{return width!=b.width||height!=b.height||bfps!=b.bfps||mask!=b.mask||ssaa!=b.ssaa||no_preview!=b.no_preview;}
 };
 inline bool ui_read_broadcast(std::istream& in,UiBroadcast& out){
-    UiBroadcast v;std::string version,extra;int preview=0,stats=0;
-    if(!(in>>version>>v.width>>v.height>>v.fps>>v.bfps>>v.mask>>v.ssaa>>preview>>stats)||version!="kawari-broadcast-1"||preview<0||preview>1||stats<0||stats>1||(in>>extra)||!v.valid())return false;
-    v.no_preview=preview!=0;v.stats=stats!=0;out=v;return true;
+    UiBroadcast v;std::string version,extra;int hidden=0,stats=0,focus=0;
+    if(!(in>>version>>v.width>>v.height>>v.fps>>v.bfps>>v.mask>>v.ssaa>>hidden>>stats))return false;
+    if(version=="kawari-broadcast-2"){
+        if(!(in>>focus)||focus<0||focus>1)return false;
+    }else if(version!="kawari-broadcast-1")return false;
+    if(hidden<0||hidden>1||stats<0||stats>1||(in>>extra)||!v.valid())return false;
+    v.no_preview=hidden!=0;v.stats=stats!=0;v.pause_unfocused_preview=focus!=0;out=v;return true;
 }
 inline std::string ui_write_broadcast(const UiBroadcast& v){
-    std::ostringstream out;out.imbue(std::locale::classic());out<<"kawari-broadcast-1\n"<<v.width<<' '<<v.height<<' '<<v.fps<<' '<<v.bfps<<' '<<v.mask<<' '<<v.ssaa<<' '<<int(v.no_preview)<<' '<<int(v.stats)<<'\n';return out.str();
+    std::ostringstream out;out.imbue(std::locale::classic());
+    out<<(v.pause_unfocused_preview?"kawari-broadcast-2\n":"kawari-broadcast-1\n")
+       <<v.width<<' '<<v.height<<' '<<v.fps<<' '<<v.bfps<<' '<<v.mask<<' '<<v.ssaa<<' '
+       <<int(v.no_preview)<<' '<<int(v.stats);
+    if(v.pause_unfocused_preview)out<<" 1";
+    out<<'\n';return out.str();
 }
 inline bool ui_flag(const char* key) {
     const char* v=std::getenv(key); return v && std::strcmp(v,"1")==0;

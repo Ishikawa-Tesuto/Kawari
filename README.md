@@ -88,6 +88,8 @@ Set the stream resolution and target frame rate under **Settings → Broadcast**
 
 Use `--no-preview` to stream with the preview window hidden. If you saved that mode as your default, pass `--preview` to show the window for one launch.
 
+When streaming a game, enable **Settings → General → Pause unfocused preview** to suspend window rendering while the game has focus. PipeWire output continues and the preview resumes when Kawari regains focus. For a one-launch override, use `--pause-unfocused-preview` or `--keep-unfocused-preview`. Add `--stats` to compare average and peak frame times for swapchain acquisition, model rendering, items, PipeWire transfer, and the preview.
+
 ## Integrations
 
 - **VBridger and plugins.** Connect to `ws://127.0.0.1:8001`, or use the port you passed to Kawari with `--port`. Approve the client's request under **Integrations → Plugins**.

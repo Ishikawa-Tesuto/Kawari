@@ -15,8 +15,15 @@ inline void set_background_frame(bool value) {
     // the perf sampler reports the current mode instead.
     background_frame_flag()=value;
 }
-inline bool can_preview(bool hidden,bool visible,bool iconified,int width,int height) {
-    return !hidden && visible && !iconified && width>0 && height>0;
+inline bool& pause_unfocused_preview() {
+    static bool paused=[] {
+        const char* setting=std::getenv("STUDIO_PAUSE_UNFOCUSED_PREVIEW");
+        return setting&&std::strcmp(setting,"1")==0;
+    }();
+    return paused;
+}
+inline bool can_preview(bool hidden,bool visible,bool iconified,int width,int height,bool focused=true,bool pause_unfocused=false) {
+    return !hidden && visible && !iconified && width>0 && height>0 && (focused||!pause_unfocused);
 }
 inline volatile std::sig_atomic_t& stop_flag() { static volatile std::sig_atomic_t flag=0; return flag; }
 inline void stop_signal(int) { stop_flag()=1; }

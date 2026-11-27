@@ -87,7 +87,10 @@ void VulkanManager::Destroy()
 
         model->SetRenderTargetSize(width, height);
 """,
-                'LAppModel.cpp': """    CreateRenderer(LAppDelegate::GetInstance()->GetWindowWidth(), LAppDelegate::GetInstance()->GetWindowHeight());
+                'LAppModel.cpp': """LAppModel::~LAppModel()
+{
+    matrix.MultiplyByMatrix(_modelMatrix);
+    CreateRenderer(LAppDelegate::GetInstance()->GetWindowWidth(), LAppDelegate::GetInstance()->GetWindowHeight());
     CreateRenderer(LAppDelegate::GetInstance()->GetWindowHeight(), LAppDelegate::GetInstance()->GetWindowHeight());
 """,
                 'LAppView.cpp': """            glfwGetFramebufferSize(LAppDelegate::GetInstance()->GetWindow(), &bufWidth, &bufHeight);
@@ -213,7 +216,11 @@ void LAppModel::Update()
             self.assertIn('_studioPhysicsEditor.bind(_physics, buffer, size)',patched_model)
             self.assertIn('_studioPhysicsEditor.activate();\n    _updateScheduler.OnLateUpdate',patched_model)
             self.assertIn('if (studio::background_frame()) return;',v)
-            self.assertIn('if (preview) vk->PostDraw();',d)
+            self.assertIn('studio::pause_unfocused_preview()',d)
+            self.assertIn('if (preview) {\n                studio::FramePhaseTimer presentTime(studio::FramePhase::Preview);\n                vk->PostDraw();',d)
+            self.assertLess(d.index('studio::set_background_frame(!preview);'),d.index('_view->Render();'))
+            self.assertIn('FramePhase::PipeWire',v)
+            self.assertIn('FramePhase::Model',v)
             self.assertIn('if (preview) preview=vk->UpdateDrawFrame();',d)
             self.assertIn('VK_TIMEOUT || result == VK_NOT_READY',vk)
             self.assertIn('bool UpdateDrawFrame();',(src/'VulkanManager.hpp').read_text())

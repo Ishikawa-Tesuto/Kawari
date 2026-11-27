@@ -1,6 +1,7 @@
 #pragma once
 #include <Model/CubismModel.hpp>
 #include <GLFW/glfw3.h>
+#include <chrono>
 #include "studio_parameters.hpp"
 
 namespace studio {
@@ -9,8 +10,18 @@ void update_controls(Live2D::Cubism::Framework::CubismModel* model, GLFWwindow* 
 void reset_controls();
 void apply_manual_overrides(Live2D::Cubism::Framework::CubismModel* model);
 void pace_frame();
-void apply_live_broadcast_settings(int fps,bool show_stats);
+void apply_live_broadcast_settings(int fps,bool show_stats,bool pause_preview);
 void begin_frame();
+enum class FramePhase { Acquire, Model, Items, PipeWire, Preview, Count };
+class FramePhaseTimer {
+    FramePhase phase;
+    std::chrono::steady_clock::time_point start;
+public:
+    explicit FramePhaseTimer(FramePhase phase);
+    ~FramePhaseTimer();
+    FramePhaseTimer(const FramePhaseTimer&)=delete;
+    FramePhaseTimer& operator=(const FramePhaseTimer&)=delete;
+};
 }
 
 namespace studio {

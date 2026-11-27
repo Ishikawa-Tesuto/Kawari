@@ -36,6 +36,7 @@ def guard_preview_submit(text):
     # Keep the declaration in outer scope for the later preview composition.
     opening = (f'{indent}VkCommandBuffer commandBuffer = VK_NULL_HANDLE;\n'
                f'{indent}if (!studio::background_frame()) {{\n'
+               f'{indent}    studio::FramePhaseTimer previewTime(studio::FramePhase::Preview);\n'
                f'{indent}    commandBuffer = vkManager->BeginSingleTimeCommands();\n'
                f'{indent}    ChangeBeginLayout(commandBuffer);')
     return (text[:b.start()] + opening + text[b.end():m.end()] +
@@ -313,14 +314,21 @@ void LAppModel::SetupModel(ICubismModelSetting* setting)""", 'parameter updater 
     view = files[src / 'LAppView.cpp']
     view = rep(view, '#include "studio_controls.hpp"', '#include "studio_controls.hpp"\n#include "studio_broadcast.hpp"\n#include "studio_items_vk.hpp"', 'broadcast view include')
     view = rep(view, '    live2DManager->OnUpdate();', '''    studio::items::begin_mesh_frame();
-    live2DManager->OnUpdate();
+    {
+        studio::FramePhaseTimer modelTime(studio::FramePhase::Model);
+        live2DManager->OnUpdate();
+    }
     if (_renderTarget == SelectTarget_ModelFrameBuffer && live2DManager->GetModelNum() > 0)
     {
         LAppModel* model = live2DManager->GetModel(0);
         if (model && model->GetModel() && model->GetRenderBuffer().IsValid())
         {
             const auto& target = model->GetRenderBuffer();
-            studio::items::render(target.GetTextureImage(), vkManager->GetImageFormat(), target.GetBufferWidth(), target.GetBufferHeight());
+            {
+                studio::FramePhaseTimer itemTime(studio::FramePhase::Items);
+                studio::items::render(target.GetTextureImage(), vkManager->GetImageFormat(), target.GetBufferWidth(), target.GetBufferHeight());
+            }
+            studio::FramePhaseTimer exportTime(studio::FramePhase::PipeWire);
             studio::broadcast_frame(target.GetTextureImage(), vkManager->GetImageFormat(),
                                     target.GetBufferWidth(), target.GetBufferHeight());
         }
@@ -430,7 +438,7 @@ endif()
     view = files[src / 'LAppView.cpp']
     view = rep(view, '#include "studio_render_size.hpp"', '#include "studio_render_size.hpp"\n#include "studio_background.hpp"', 'background view include')
     view = guard_preview_submit(view)
-    view = rep(view, '    if (_renderTarget == SelectTarget_ModelFrameBuffer && _renderSprite)', '    if (studio::background_frame()) return;\n    if (_renderTarget == SelectTarget_ModelFrameBuffer && _renderSprite)', 'background skip preview composite')
+    view = rep(view, '    if (_renderTarget == SelectTarget_ModelFrameBuffer && _renderSprite)', '    if (studio::background_frame()) return;\n    studio::FramePhaseTimer previewTime(studio::FramePhase::Preview);\n    if (_renderTarget == SelectTarget_ModelFrameBuffer && _renderSprite)', 'background skip preview composite')
     view = rep(view, 'void LAppView::PostModelDraw(LAppModel &refModel)\n{', 'void LAppView::PostModelDraw(LAppModel &refModel)\n{\n    if (studio::background_frame()) return;', 'background avoid restoring WSI target')
     files[src / 'LAppView.cpp'] = view
     vm = files[src / 'VulkanManager.cpp']
@@ -481,16 +489,23 @@ endif()
             glfwGetFramebufferSize(_window,&fbw,&fbh);
             bool preview=studio::can_preview(noPreview,
                 glfwGetWindowAttrib(_window,GLFW_VISIBLE)==GLFW_TRUE,
-                glfwGetWindowAttrib(_window,GLFW_ICONIFIED)==GLFW_TRUE,fbw,fbh);
-            if (preview && vk->GetIsWindowSizeChanged()) {
-                RecreateSwapchain();
-                preview = !vk->GetIsWindowSizeChanged();
+                glfwGetWindowAttrib(_window,GLFW_ICONIFIED)==GLFW_TRUE,fbw,fbh,
+                glfwGetWindowAttrib(_window,GLFW_FOCUSED)==GLFW_TRUE,studio::pause_unfocused_preview());
+            if (preview) {
+                studio::FramePhaseTimer acquireTime(studio::FramePhase::Acquire);
+                if (vk->GetIsWindowSizeChanged()) {
+                    RecreateSwapchain();
+                    preview = !vk->GetIsWindowSizeChanged();
+                }
+                // A timeout/out-of-date acquire leaves no image to present.
+                if (preview) preview=vk->UpdateDrawFrame();
             }
-            // A timeout/out-of-date acquire leaves no image to present.
-            if (preview) preview=vk->UpdateDrawFrame();
             studio::set_background_frame(!preview);
             _view->Render();
-            if (preview) vk->PostDraw();
+            if (preview) {
+                studio::FramePhaseTimer presentTime(studio::FramePhase::Preview);
+                vk->PostDraw();
+            }
             studio::pace_frame();
             continue;
         }
@@ -503,6 +518,7 @@ endif()
     view = rep(view, '#include "studio_background.hpp"', '#include "studio_background.hpp"\n#include "studio_ui.hpp"', 'workspace include')
     view = rep(view, '    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;', """    bool workspace = false;
     if (!studio::background_frame()) {
+        studio::FramePhaseTimer uiTime(studio::FramePhase::Preview);
         auto* model = live2DManager->GetModelNum() > 0 ? live2DManager->GetModel(0) : nullptr;
         workspace = studio::ui_begin(LAppDelegate::GetInstance()->GetWindow(),
             vkManager->GetStudioInstance(), vkManager->GetPhysicalDevice(), vkManager->GetDevice(),

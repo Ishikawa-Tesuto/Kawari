@@ -18,6 +18,13 @@ int main(){
     assert(!can_preview(false,true,true,800,600));
     assert(!can_preview(false,true,false,0,600));
     assert(!can_preview(false,true,false,800,0));
+    setenv("STUDIO_PAUSE_UNFOCUSED_PREVIEW","1",1);
+    assert(pause_unfocused_preview());
+    assert(!can_preview(false,true,false,800,600,false,pause_unfocused_preview()));
+    assert(can_preview(false,true,false,800,600,true,pause_unfocused_preview()));
+    pause_unfocused_preview()=false;
+    assert(can_preview(false,true,false,800,600,false,pause_unfocused_preview()));
+    assert(!can_preview(true,true,false,800,600,true,pause_unfocused_preview()));
     assert(!background_frame()); set_background_frame(true); assert(background_frame());
     set_background_frame(false); assert(!background_frame());
     install_stop_signals(); assert(!stop_requested());

@@ -87,23 +87,43 @@ fn prepare_model(model:&Path,dest:&Path,cfg_path:&Path,cfg:&V)->R<()> {
 // App-wide broadcast preferences. The GUI writes requests only to the private
 // supervisor mailbox; the supervisor validates and atomically stores them.
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
-struct BroadcastSettings { width:u32,height:u32,fps:u32,bfps:u32,mask:u32,ssaa:u32,no_preview:bool,stats:bool }
-impl Default for BroadcastSettings {fn default()->Self{Self{width:1920,height:1080,fps:60,bfps:60,mask:1024,ssaa:1,no_preview:false,stats:false}}}
+struct BroadcastSettings { width:u32,height:u32,fps:u32,bfps:u32,mask:u32,ssaa:u32,no_preview:bool,stats:bool,pause_unfocused_preview:bool }
+impl Default for BroadcastSettings {fn default()->Self{Self{width:1920,height:1080,fps:60,bfps:60,mask:1024,ssaa:1,no_preview:false,stats:false,pause_unfocused_preview:false}}}
 impl BroadcastSettings {
     fn valid(&self)->bool{(320..=7680).contains(&self.width)&&(320..=7680).contains(&self.height)&&matches!(self.fps,0|30|60|120|144)&&matches!(self.bfps,30|60|120|144)&&matches!(self.mask,256|512|1024|2048)&&matches!(self.ssaa,1|2)&& (self.ssaa==1||(self.width<=3840&&self.height<=3840))}
-    fn encode(&self)->String{format!("kawari-broadcast-1\n{} {} {} {} {} {} {} {}\n",self.width,self.height,self.fps,self.bfps,self.mask,self.ssaa,self.no_preview as u8,self.stats as u8)}
-    fn decode(text:&str)->R<Self>{let mut it=text.split_whitespace();if it.next()!=Some("kawari-broadcast-1"){return Err(err("Unknown broadcast settings version"))}let mut n=[0u32;8];for v in &mut n{*v=it.next().ok_or_else(||err("Incomplete broadcast settings"))?.parse()?;}let s=Self{width:n[0],height:n[1],fps:n[2],bfps:n[3],mask:n[4],ssaa:n[5],no_preview:n[6]==1,stats:n[7]==1};if it.next().is_some()||n[6]>1||n[7]>1||!s.valid(){return Err(err("Invalid broadcast settings"))}Ok(s)}
+    fn encode(&self)->String {
+        let (version,focus)=if self.pause_unfocused_preview{("kawari-broadcast-2"," 1")}else{("kawari-broadcast-1","")};
+        format!("{version}\n{} {} {} {} {} {} {} {}{focus}\n",self.width,self.height,self.fps,self.bfps,self.mask,self.ssaa,self.no_preview as u8,self.stats as u8)
+    }
+    fn decode(text:&str)->R<Self>{
+        let mut fields=text.split_whitespace();
+        let count=match fields.next(){
+            Some("kawari-broadcast-1")=>8,
+            Some("kawari-broadcast-2")=>9,
+            _=>return Err(err("Unknown broadcast settings version")),
+        };
+        let mut n=[0u32;9];
+        for value in &mut n[..count] {
+            *value=fields.next().ok_or_else(||err("Incomplete broadcast settings"))?.parse()?;
+        }
+        let settings=Self{width:n[0],height:n[1],fps:n[2],bfps:n[3],mask:n[4],ssaa:n[5],
+            no_preview:n[6]==1,stats:n[7]==1,pause_unfocused_preview:n[8]==1};
+        if fields.next().is_some()||n[6..].iter().any(|&v|v>1)||!settings.valid(){
+            return Err(err("Invalid broadcast settings"));
+        }
+        Ok(settings)
+    }
 }
 fn broadcast_path()->R<PathBuf>{Ok(library::directory()?.join("broadcast.conf"))}
 fn atomic_text(path:&Path,text:&str)->R<()>{let parent=path.parent().ok_or_else(||err("Missing settings parent"))?;let mut f=tempfile::NamedTempFile::new_in(parent)?;f.write_all(text.as_bytes())?;f.as_file().sync_all()?;f.persist(path)?;Ok(())}
 fn load_broadcast()->R<BroadcastSettings>{let path=broadcast_path()?;match fs::read_to_string(&path){Ok(text)=>BroadcastSettings::decode(&text),Err(e) if e.kind()==io::ErrorKind::NotFound=>Ok(BroadcastSettings::default()),Err(e)=>Err(e.into())}}
 #[derive(Debug,Clone)]
-struct Args{model:PathBuf,profile:Option<PathBuf>,runtime:Option<PathBuf>,mapping:Option<PathBuf>,state:Option<PathBuf>,allowed:Vec<String>,port:u16,size:(u32,u32),output:(u32,u32),fps:u32,bfps:u32,mask:u32,ssaa:u32,no_preview:bool,no_broadcast:bool,stats:bool,timeout:Duration,switch_timeout:Duration,prepare_only:bool,library_dirs:Vec<PathBuf>}
-const HELP:&str="kawari [OPTIONS] [ORIGINAL.model3.json]\n  --library-dir DIR (repeat)\n  --allow-plugin NAME (repeat) --profile-dir DIR --runtime-model FILE\n  --parameter-map FILE --state-file FILE --port 8001 --size 800x600\n  --broadcast-size 1920x1080 --fps 60 --broadcast-fps 60\n  --no-preview | --preview --no-broadcast --stats | --no-stats\n  --mask-size 1024 --ssaa 1 (broadcast settings protocol 1; plugin manager protocol 1)\n  --startup-timeout 30 --prepare-only\n  --switch-timeout 120 (hot switch acknowledgment)\n  STUDIO_HOT_SWITCH=1 (hot switch protocol 1)\n  Persistent WebSocket (persistent API protocol 1)\n  Kawari expression UI protocol 3";
+struct Args{model:PathBuf,profile:Option<PathBuf>,runtime:Option<PathBuf>,mapping:Option<PathBuf>,state:Option<PathBuf>,allowed:Vec<String>,port:u16,size:(u32,u32),output:(u32,u32),fps:u32,bfps:u32,mask:u32,ssaa:u32,no_preview:bool,no_broadcast:bool,stats:bool,pause_unfocused_preview:bool,timeout:Duration,switch_timeout:Duration,prepare_only:bool,library_dirs:Vec<PathBuf>}
+const HELP:&str="kawari [OPTIONS] [ORIGINAL.model3.json]\n  --library-dir DIR (repeat)\n  --allow-plugin NAME (repeat) --profile-dir DIR --runtime-model FILE\n  --parameter-map FILE --state-file FILE --port 8001 --size 800x600\n  --broadcast-size 1920x1080 --fps 60 --broadcast-fps 60\n  --no-preview | --preview --no-broadcast --stats | --no-stats\n  --pause-unfocused-preview | --keep-unfocused-preview\n  --mask-size 1024 --ssaa 1 (broadcast settings protocol 1; plugin manager protocol 1)\n  --startup-timeout 30 --prepare-only\n  --switch-timeout 120 (hot switch acknowledgment)\n  STUDIO_HOT_SWITCH=1 (hot switch protocol 1)\n  Persistent WebSocket (persistent API protocol 1)\n  Kawari expression UI protocol 3";
 fn size(s:&str)->R<(u32,u32)>{let (w,h)=s.split_once('x').ok_or_else(||err("Expected WIDTHxHEIGHT"))?;let (w,h):(u32,u32)=(w.parse()?,h.parse()?);if !(320..=7680).contains(&w)||!(320..=7680).contains(&h){return Err(err("Size outside 320..7680"))}Ok((w,h))}
 fn parse()->R<Option<Args>>{
-    let mut a=Args{model:PathBuf::new(),profile:None,runtime:None,mapping:None,state:None,allowed:vec![],port:8001,size:(800,600),output:(1920,1080),fps:60,bfps:60,mask:1024,ssaa:1,no_preview:false,no_broadcast:false,stats:false,timeout:Duration::from_secs(30),switch_timeout:Duration::from_secs(120),prepare_only:false,library_dirs:vec![]};let mut it=env::args_os().skip(1);let mut explicit=BTreeSet::new();
-    while let Some(k)=it.next(){if let Some(s)=k.to_str(){explicit.insert(s.to_owned());}match k.to_str(){Some("--help"|"-h")=>{println!("{HELP}");return Ok(None)},Some("--no-preview")=>a.no_preview=true,Some("--preview")=>a.no_preview=false,Some("--no-broadcast")=>a.no_broadcast=true,Some("--stats")=>a.stats=true,Some("--no-stats")=>a.stats=false,Some("--prepare-only")=>a.prepare_only=true,Some(s) if s.starts_with('-')=>{let v=it.next().ok_or_else(||err(format!("Missing value for {s}")))?;let txt=||v.to_str().ok_or_else(||err("Expected UTF-8 option value"));match s{"--library-dir"=>a.library_dirs.push(PathBuf::from(&v)),"--profile-dir"=>a.profile=Some(PathBuf::from(&v)),"--runtime-model"=>a.runtime=Some(PathBuf::from(&v)),"--parameter-map"=>a.mapping=Some(PathBuf::from(&v)),"--state-file"=>a.state=Some(PathBuf::from(&v)),"--allow-plugin"=>a.allowed.push(txt()?.to_owned()),"--port"=>a.port=txt()?.parse()?,"--size"=>a.size=size(txt()?)?,"--broadcast-size"=>a.output=size(txt()?)?,"--fps"=>a.fps=txt()?.parse()?,"--broadcast-fps"=>a.bfps=txt()?.parse()?,"--mask-size"=>a.mask=txt()?.parse()?,"--ssaa"=>a.ssaa=txt()?.parse()?,"--startup-timeout"=>{let t:f64=txt()?.parse()?;if !(1.0..=300.0).contains(&t){return Err(err("Invalid timeout"))}a.timeout=Duration::from_secs_f64(t);},"--switch-timeout"=>{let t:f64=txt()?.parse()?;if !(1.0..=300.0).contains(&t){return Err(err("Invalid switch timeout"))}a.switch_timeout=Duration::from_secs_f64(t);},"--api-backend" if txt()?=="rust"=>{},_=>return Err(err(format!("Unknown option {s}")))}} ,_ if a.model.as_os_str().is_empty()=>a.model=PathBuf::from(k),_=>return Err(err("Specify one model"))}}
+    let mut a=Args{model:PathBuf::new(),profile:None,runtime:None,mapping:None,state:None,allowed:vec![],port:8001,size:(800,600),output:(1920,1080),fps:60,bfps:60,mask:1024,ssaa:1,no_preview:false,no_broadcast:false,stats:false,pause_unfocused_preview:false,timeout:Duration::from_secs(30),switch_timeout:Duration::from_secs(120),prepare_only:false,library_dirs:vec![]};let mut it=env::args_os().skip(1);let mut explicit=BTreeSet::new();
+    while let Some(k)=it.next(){if let Some(s)=k.to_str(){explicit.insert(s.to_owned());}match k.to_str(){Some("--help"|"-h")=>{println!("{HELP}");return Ok(None)},Some("--no-preview")=>a.no_preview=true,Some("--preview")=>a.no_preview=false,Some("--pause-unfocused-preview")=>a.pause_unfocused_preview=true,Some("--keep-unfocused-preview")=>a.pause_unfocused_preview=false,Some("--no-broadcast")=>a.no_broadcast=true,Some("--stats")=>a.stats=true,Some("--no-stats")=>a.stats=false,Some("--prepare-only")=>a.prepare_only=true,Some(s) if s.starts_with('-')=>{let v=it.next().ok_or_else(||err(format!("Missing value for {s}")))?;let txt=||v.to_str().ok_or_else(||err("Expected UTF-8 option value"));match s{"--library-dir"=>a.library_dirs.push(PathBuf::from(&v)),"--profile-dir"=>a.profile=Some(PathBuf::from(&v)),"--runtime-model"=>a.runtime=Some(PathBuf::from(&v)),"--parameter-map"=>a.mapping=Some(PathBuf::from(&v)),"--state-file"=>a.state=Some(PathBuf::from(&v)),"--allow-plugin"=>a.allowed.push(txt()?.to_owned()),"--port"=>a.port=txt()?.parse()?,"--size"=>a.size=size(txt()?)?,"--broadcast-size"=>a.output=size(txt()?)?,"--fps"=>a.fps=txt()?.parse()?,"--broadcast-fps"=>a.bfps=txt()?.parse()?,"--mask-size"=>a.mask=txt()?.parse()?,"--ssaa"=>a.ssaa=txt()?.parse()?,"--startup-timeout"=>{let t:f64=txt()?.parse()?;if !(1.0..=300.0).contains(&t){return Err(err("Invalid timeout"))}a.timeout=Duration::from_secs_f64(t);},"--switch-timeout"=>{let t:f64=txt()?.parse()?;if !(1.0..=300.0).contains(&t){return Err(err("Invalid switch timeout"))}a.switch_timeout=Duration::from_secs_f64(t);},"--api-backend" if txt()?=="rust"=>{},_=>return Err(err(format!("Unknown option {s}")))}} ,_ if a.model.as_os_str().is_empty()=>a.model=PathBuf::from(k),_=>return Err(err("Specify one model"))}}
     if !a.prepare_only{
         let saved=match load_broadcast(){Ok(v)=>v,Err(e)=>{eprintln!("[broadcast-settings] Cannot read saved preferences: {e}; using defaults");BroadcastSettings::default()}};
         if !explicit.contains("--broadcast-size"){a.output=(saved.width,saved.height)}
@@ -113,11 +133,14 @@ fn parse()->R<Option<Args>>{
         if !explicit.contains("--ssaa"){a.ssaa=env::var("STUDIO_SSAA").ok().and_then(|v|v.parse::<u32>().ok()).filter(|v|matches!(*v,1|2)).unwrap_or(saved.ssaa)}
         if !explicit.contains("--no-preview")&&!explicit.contains("--preview"){a.no_preview=saved.no_preview&&!a.no_broadcast}
         if !explicit.contains("--stats")&&!explicit.contains("--no-stats"){a.stats=saved.stats}
+        if !explicit.contains("--pause-unfocused-preview")&&!explicit.contains("--keep-unfocused-preview"){
+            a.pause_unfocused_preview=saved.pause_unfocused_preview;
+        }
         if a.ssaa==2&&(a.output.0>3840||a.output.1>3840){eprintln!("[broadcast-settings] 2x SSAA unavailable above 3840 per dimension; using 1x");a.ssaa=1;}
     }
     if (a.model.as_os_str().is_empty()&&a.prepare_only)||a.port==0||a.allowed.iter().any(|s|s.trim().is_empty())||!matches!(a.fps,0|30|60|120|144)||!matches!(a.bfps,30|60|120|144)||!a.broadcast_settings().valid()||a.no_preview&&a.no_broadcast{return Err(err("Invalid options; prepare-only requires a model"))}Ok(Some(a))
 }
-impl Args {fn broadcast_settings(&self)->BroadcastSettings{BroadcastSettings{width:self.output.0,height:self.output.1,fps:self.fps,bfps:self.bfps,mask:self.mask,ssaa:self.ssaa,no_preview:self.no_preview,stats:self.stats}}}
+impl Args {fn broadcast_settings(&self)->BroadcastSettings{BroadcastSettings{width:self.output.0,height:self.output.1,fps:self.fps,bfps:self.bfps,mask:self.mask,ssaa:self.ssaa,no_preview:self.no_preview,stats:self.stats,pause_unfocused_preview:self.pause_unfocused_preview}}}
 struct Profile{model:PathBuf,runtime:PathBuf,mapping:Option<PathBuf>,state:PathBuf,tokens:PathBuf,view:PathBuf,_lock:File}
 fn profile_key(p:&Path)->R<String>{let s=p.to_str().ok_or_else(||err("Model path must be UTF-8"))?;Ok(Sha256::digest(s.as_bytes()).iter().take(12).map(|b|format!("{b:02x}")).collect::<Vec<_>>().join(""))}
 fn prepare(a:&Args)->R<Profile>{
@@ -203,7 +226,7 @@ fn viewer_command(a:&Args,p:&Profile,runtime:&RuntimePaths)->R<Command>{
     if runtime.installed && env::var_os("STUDIO_UI").is_none() {
         cmd.env("STUDIO_UI", "1");
     }
-    for(k,v)in [("STUDIO_FPS",a.fps.to_string()),("STUDIO_MASK_SIZE",a.mask.to_string()),("STUDIO_SSAA",a.ssaa.to_string()),("STUDIO_OFFSCREEN",((!a.no_broadcast) as u8).to_string()),("STUDIO_STATS",(a.stats as u8).to_string()),("STUDIO_DEMO","0".into()),("STUDIO_BROADCAST",((!a.no_broadcast) as u8).to_string()),("STUDIO_NO_PREVIEW",(a.no_preview as u8).to_string()),("STUDIO_BROADCAST_FPS",a.bfps.to_string()),("STUDIO_PARAMETER_INPUT","1".into()),("STUDIO_WIDTH",a.size.0.to_string()),("STUDIO_HEIGHT",a.size.1.to_string()),("STUDIO_BROADCAST_WIDTH",a.output.0.to_string()),("STUDIO_BROADCAST_HEIGHT",a.output.1.to_string())]{cmd.env(k,v);}cmd.env("STUDIO_MODEL",&p.runtime).env_remove("STUDIO_PARAMETER_MAP").env_remove("STUDIO_EDITABLE_MAP");if let Some(m)=&p.mapping{cmd.env("STUDIO_PARAMETER_MAP",m);if a.mapping.is_none(){cmd.env("STUDIO_EDITABLE_MAP",m);}}Ok(cmd)
+    for(k,v)in [("STUDIO_FPS",a.fps.to_string()),("STUDIO_MASK_SIZE",a.mask.to_string()),("STUDIO_SSAA",a.ssaa.to_string()),("STUDIO_OFFSCREEN",((!a.no_broadcast) as u8).to_string()),("STUDIO_STATS",(a.stats as u8).to_string()),("STUDIO_DEMO","0".into()),("STUDIO_BROADCAST",((!a.no_broadcast) as u8).to_string()),("STUDIO_NO_PREVIEW",(a.no_preview as u8).to_string()),("STUDIO_PAUSE_UNFOCUSED_PREVIEW",(a.pause_unfocused_preview as u8).to_string()),("STUDIO_BROADCAST_FPS",a.bfps.to_string()),("STUDIO_PARAMETER_INPUT","1".into()),("STUDIO_WIDTH",a.size.0.to_string()),("STUDIO_HEIGHT",a.size.1.to_string()),("STUDIO_BROADCAST_WIDTH",a.output.0.to_string()),("STUDIO_BROADCAST_HEIGHT",a.output.1.to_string())]{cmd.env(k,v);}cmd.env("STUDIO_MODEL",&p.runtime).env_remove("STUDIO_PARAMETER_MAP").env_remove("STUDIO_EDITABLE_MAP");if let Some(m)=&p.mapping{cmd.env("STUDIO_PARAMETER_MAP",m);if a.mapping.is_none(){cmd.env("STUDIO_EDITABLE_MAP",m);}}Ok(cmd)
 }
 enum SessionExit { End(i32), Switch(Args, Profile) }
 fn start_api(a:&Args,p:&Profile,sock:&Path,api_bin:&Path,control:Option<&Path>,tx:&mpsc::Sender<(&'static str,String)>)->R<Managed>{
@@ -291,7 +314,7 @@ fn run_session(a:&mut Args,p:&mut Profile,lib:&mut library::Library,runtime:&Run
         if request.exists(){
             let result=(||->R<BroadcastSettings>{let text=fs::read_to_string(&request)?;let next=BroadcastSettings::decode(&text)?;let path=broadcast_path()?;atomic_text(&path,&next.encode())?;Ok(next)})();
             fs::remove_file(&request)?;
-            let reply=match result{Ok(next)=>{a.fps=next.fps;a.stats=next.stats;atomic_text(&mailbox.path().join("broadcast-current.tsv"),&a.broadcast_settings().encode())?;println!("[broadcast-settings] Saved; output and quality changes apply on next launch");"ok".to_owned()},Err(e)=>format!("error: {e}")};
+            let reply=match result{Ok(next)=>{a.fps=next.fps;a.stats=next.stats;a.pause_unfocused_preview=next.pause_unfocused_preview;atomic_text(&mailbox.path().join("broadcast-current.tsv"),&a.broadcast_settings().encode())?;println!("[broadcast-settings] Saved; output and quality changes apply on next launch");"ok".to_owned()},Err(e)=>format!("error: {e}")};
             atomic_text(&mailbox.path().join("broadcast-result.txt"),&reply)?;
         }
         let selection=(||->R<Option<(Args,Profile)>>{
@@ -353,4 +376,12 @@ fn main(){match run(){Ok(code)=>std::process::exit(code),Err(e)=>{eprintln!("[st
 #[test]fn profile_physics(){let p=json!({"Version":3,"PhysicsSettings":[{"Id":"A","Output":[{"Type":"Angle","Scale":2},{"Type":"X","Scale":7}]}]});let c=json!({"PhysicsCustomizationSettings":{"PhysicsMultipliersPerPhysicsGroup":[{"ID":"A","Value":1.2}]}});let(v,_,w)=physics(p,&c).unwrap();assert_eq!(v["PhysicsSettings"][0]["Output"][0]["Scale"],2.4);assert_eq!(v["PhysicsSettings"][0]["Output"][1]["Scale"],7);assert_eq!(w.len(),1);}
 #[test]fn path_guards(){assert!(asset_path("../x").is_err());assert!(asset_path("/x").is_err());assert!(size("800x600").is_ok());assert!(size("0x600").is_err());}}
 
-#[cfg(test)] mod broadcast_tests {use super::*;#[test]fn roundtrip_and_validation(){let d=BroadcastSettings::default();assert_eq!(BroadcastSettings::decode(&d.encode()).unwrap(),d);for bad in ["kawari-broadcast-1 0 1080 60 60 1024 1 0 0","kawari-broadcast-1 7680 4320 60 60 1024 2 0 0","kawari-broadcast-1 1920 1080 61 60 1024 1 0 0","kawari-broadcast-1 1920 1080 60 60 1024 1 2 0","kawari-broadcast-1 1920 1080 60 60 1024 1 0 0 trailing"]{assert!(BroadcastSettings::decode(bad).is_err());}}}
+#[cfg(test)] mod broadcast_tests {use super::*;#[test]fn unfocused_preview_wire_format(){
+    let previous="kawari-broadcast-1\n1920 1080 60 60 1024 1 0 0\n";
+    let enabled="kawari-broadcast-2\n1920 1080 60 60 1024 1 0 0 1\n";
+    assert!(!BroadcastSettings::decode(previous).unwrap().pause_unfocused_preview);
+    let value=BroadcastSettings::decode(enabled).unwrap();
+    assert!(value.pause_unfocused_preview);
+    assert_eq!(value.encode(),enabled);
+    assert!(BroadcastSettings::decode("kawari-broadcast-2 1920 1080 60 60 1024 1 0 0 2").is_err());
+}#[test]fn roundtrip_and_validation(){let d=BroadcastSettings::default();assert_eq!(BroadcastSettings::decode(&d.encode()).unwrap(),d);for bad in ["kawari-broadcast-1 0 1080 60 60 1024 1 0 0","kawari-broadcast-1 7680 4320 60 60 1024 2 0 0","kawari-broadcast-1 1920 1080 61 60 1024 1 0 0","kawari-broadcast-1 1920 1080 60 60 1024 1 2 0","kawari-broadcast-1 1920 1080 60 60 1024 1 0 0 trailing"]{assert!(BroadcastSettings::decode(bad).is_err());}}}

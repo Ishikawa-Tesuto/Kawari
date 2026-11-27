@@ -580,7 +580,8 @@ void broadcast_popup(const ImVec2& sz){
             if(reply=="ok"){
                 broadcast_saved=broadcast_draft;
                 broadcast_active.fps=broadcast_saved.fps;broadcast_active.stats=broadcast_saved.stats;
-                apply_live_broadcast_settings(broadcast_saved.fps,broadcast_saved.stats);
+                broadcast_active.pause_unfocused_preview=broadcast_saved.pause_unfocused_preview;
+                apply_live_broadcast_settings(broadcast_saved.fps,broadcast_saved.stats,broadcast_saved.pause_unfocused_preview);
                 broadcast_message=broadcast_saved.restart_diff(broadcast_active)?"Saved. Restart Kawari to apply output and quality changes.":"Saved and applied.";
             }else broadcast_message=reply;
         }
@@ -633,6 +634,8 @@ void broadcast_popup(const ImVec2& sz){
     if(ImGui::Combo("##ui_language",&language,languages,2))appearance.russian=language==1;
     ImGui::TextWrapped("%s",ui::tr("Navigation and tab titles only; changes save automatically.","Только навигация и заголовки вкладок; сохраняется автоматически."));
     ImGui::Separator();
+    ImGui::Checkbox("Pause unfocused preview",&d.pause_unfocused_preview);
+    ImGui::SetItemTooltip("Continues broadcasting while the preview window is inactive.");
     ImGui::Checkbox("Start without preview",&d.no_preview);
     if(d.no_preview)ImGui::TextWrapped("Use --preview at launch to restore the interface.");
     ImGui::EndTabItem();}
